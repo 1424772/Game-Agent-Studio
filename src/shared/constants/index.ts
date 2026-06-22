@@ -1,27 +1,20 @@
 export const GAME_TYPES = [
-  { value: 'card_game', label: 'Card Game / Roguelike Card' },
-  { value: 'visual_novel', label: 'Galgame / Visual Novel' },
-  { value: 'rpg', label: 'RPG (Coming Soon)' },
-  { value: 'puzzle', label: 'Puzzle (Coming Soon)' },
+  { value: 'card_game', label: '卡牌游戏 / Roguelike Card' },
+  { value: 'visual_novel', label: '视觉小说 / Visual Novel' },
 ] as const;
 
 export const WORKFLOW_TYPES = [
-  { value: 'card_game_concept', label: 'Card Game Concept' },
-  { value: 'visual_novel_concept', label: 'Visual Novel Concept' },
-  { value: 'game_design_doc', label: 'Game Design Document' },
+  { value: 'card_game_concept', label: '卡牌游戏概念' },
+  { value: 'visual_novel_concept', label: '视觉小说概念' },
+  { value: 'game_design_doc', label: '游戏设计文档' },
 ] as const;
 
-export const AGENT_NAMES = [
-  'ProducerAgent',
-  'GameDesignerAgent',
-  'NarrativeAgent',
-  'RuleAgent',
-  'ArtDirectorAgent',
-  'CardGameAgent',
-  'VNAgent',
-  'QAAgent',
-  'MemoryAgent',
+export const LANGUAGES = [
+  { value: 'zh', label: '中文' },
+  { value: 'en', label: 'English' },
 ] as const;
+
+export const DEFAULT_LANGUAGE = 'zh';
 
 export const MEMORY_TYPES = [
   'world_setting',
@@ -39,20 +32,8 @@ export const MEMORY_TYPES = [
 ] as const;
 
 export const LAYER_DEFINITIONS = [
-  { layer: 'L1' as const, name: 'Session Memory', description: 'Current task context, conversation goals, temporary constraints, agent execution state.', allowed_scopes: ['session'] },
-  { layer: 'L2' as const, name: 'Project Memory', description: 'World setting, characters, plot, rules, cards/items/levels, art style, rejected ideas, export records.', allowed_scopes: ['project'] },
-  { layer: 'L3' as const, name: 'User Preference Memory', description: 'Preferred game types, platforms, art styles, models, narrative length, plot pacing, rule complexity.', allowed_scopes: ['global'] },
-  { layer: 'L4' as const, name: 'System Evolution Memory', description: 'Agent workflow success rate, prompt template effectiveness, user-accepted/rejected system improvements.', allowed_scopes: ['project', 'global'] },
-] as const;
-
-export const PREFERENCE_KEYS = [
-  'preferred_game_types',
-  'preferred_platforms',
-  'preferred_art_styles',
-  'favorite_models',
-  'accepted_output_types',
-  'rejected_output_types',
-  'narrative_length_preference',
-  'plot_pacing_preference',
-  'rule_complexity_preference',
+  { layer: 'L1' as const, name: '会话记忆', description: '当前任务上下文、对话目标、临时约束、Agent 执行状态。', allowed_scopes: ['session'] },
+  { layer: 'L2' as const, name: '项目记忆', description: '世界观、角色、剧情、规则、卡牌/道具/关卡、美术风格、已否定方案。', allowed_scopes: ['project'] },
+  { layer: 'L3' as const, name: '用户偏好记忆', description: '偏好游戏类型、平台、美术风格、常用模型、文案长度偏好等。', allowed_scopes: ['global'] },
+  { layer: 'L4' as const, name: '系统进化记忆', description: 'Agent 工作流成功率、Prompt 模板效果、用户接受/拒绝的系统改进。', allowed_scopes: ['project', 'global'] },
 ] as const;

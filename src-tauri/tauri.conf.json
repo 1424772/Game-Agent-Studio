@@ -1,4 +1,4 @@
-﻿{
+{
     "$schema":  "https://raw.githubusercontent.com/nicedoc/schemas/main/tauri-conf-v2.json",
     "productName":  "Game Agent Studio",
     "version":  "0.2.0",

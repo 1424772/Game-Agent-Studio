@@ -1,25 +1,29 @@
 import React from 'react';
 import { useAppStore } from '../stores/useAppStore';
-
-const NAV_ITEMS = [
-  { route: 'dashboard', label: 'Project Dashboard', icon: '\u{1F3E0}' },
-  { route: 'settings', label: 'Model Settings', icon: '\u{2699}\uFE0F' },
-  { route: 'workspace', label: 'Agent Workspace', icon: '\u{1F916}' },
-  { route: 'memory', label: 'Memory Center', icon: '\u{1F9E0}' },
-  { route: 'knowledge', label: 'Knowledge Base', icon: '\u{1F4DA}' },
-  { route: 'export', label: 'Export Center', icon: '\u{1F4E4}' },
-  { route: 'iteration', label: 'Self-Iteration', icon: '\u{1F504}' },
-];
+import { LANGUAGES } from '../../shared/constants';
+import { useT, useLang } from '../../shared/i18n';
 
 export default function Sidebar() {
   const currentRoute = useAppStore((s) => s.currentRoute);
   const setRoute = useAppStore((s) => s.setRoute);
+  const t = useT();
+  const { lang, setLang } = useLang();
+
+  const NAV_ITEMS = [
+    { route: 'dashboard', label: t.nav.dashboard, icon: '\u{1F3E0}' },
+    { route: 'settings', label: t.nav.settings, icon: '\u{2699}\uFE0F' },
+    { route: 'workspace', label: t.nav.workspace, icon: '\u{1F916}' },
+    { route: 'memory', label: t.nav.memory, icon: '\u{1F9E0}' },
+    { route: 'knowledge', label: t.nav.knowledge, icon: '\u{1F4DA}' },
+    { route: 'export', label: t.nav.export, icon: '\u{1F4E4}' },
+    { route: 'iteration', label: t.nav.iteration, icon: '\u{1F504}' },
+  ];
 
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <h1 className="sidebar-logo">Game Agent Studio</h1>
-        <span className="sidebar-subtitle">Multi-Agent Game Creator</span>
+        <h1 className="sidebar-logo">{t.app.title}</h1>
+        <span className="sidebar-subtitle">{t.app.subtitle}</span>
       </div>
       <nav className="sidebar-nav">
         {NAV_ITEMS.map((item) => (
@@ -34,7 +38,12 @@ export default function Sidebar() {
         ))}
       </nav>
       <div className="sidebar-footer">
-        <span className="sidebar-version">v0.1.0</span>
+        <select className="lang-select" value={lang} onChange={(e) => setLang(e.target.value)}>
+          {LANGUAGES.map((l) => (
+            <option key={l.value} value={l.value}>{l.label}</option>
+          ))}
+        </select>
+        <span className="sidebar-version">v0.2.0</span>
       </div>
     </aside>
   );
