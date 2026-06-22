@@ -34,6 +34,15 @@ export const MEMORY_TYPES = [
   'art_style',
   'rejected_idea',
   'export_record',
+  'qa_review',
+  'system_internal',
+] as const;
+
+export const LAYER_DEFINITIONS = [
+  { layer: 'L1' as const, name: 'Session Memory', description: 'Current task context, conversation goals, temporary constraints, agent execution state.', allowed_scopes: ['session'] },
+  { layer: 'L2' as const, name: 'Project Memory', description: 'World setting, characters, plot, rules, cards/items/levels, art style, rejected ideas, export records.', allowed_scopes: ['project'] },
+  { layer: 'L3' as const, name: 'User Preference Memory', description: 'Preferred game types, platforms, art styles, models, narrative length, plot pacing, rule complexity.', allowed_scopes: ['global'] },
+  { layer: 'L4' as const, name: 'System Evolution Memory', description: 'Agent workflow success rate, prompt template effectiveness, user-accepted/rejected system improvements.', allowed_scopes: ['project', 'global'] },
 ] as const;
 
 export const PREFERENCE_KEYS = [

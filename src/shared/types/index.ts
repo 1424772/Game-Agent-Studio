@@ -51,6 +51,7 @@ export interface AgentStep {
   id: string;
   run_id: string;
   agent_name: string;
+  step_key: string;
   step_order: number;
   step_type: string;
   input_json: string | null;
@@ -145,6 +146,21 @@ export interface RetrievalRun {
   created_at: string;
 }
 
+export interface HitExcerpt {
+  id: string;
+  retrieval_run_id: string;
+  chunk_id: string;
+  score: number;
+  rank: number;
+  used_by_agent: string | null;
+  created_at: string;
+  doc_title: string;
+  doc_type: string;
+  chunk_excerpt: string;
+  source: string | null;
+  provenance: string | null;
+}
+
 export interface RetrievalHit {
   id: string;
   retrieval_run_id: string;
@@ -163,8 +179,23 @@ export interface ImprovementProposal {
   risk_level: string | null;
   status: ProposalStatus;
   requires_human_approval: boolean;
+  target_area: string | null;
+  proposed_change: string | null;
   created_at: string;
   reviewed_at: string | null;
+}
+
+export interface MemoryVersion {
+  id: string;
+  memory_id: string;
+  project_id: string;
+  memory_type: string;
+  key: string;
+  old_value: string;
+  new_value: string;
+  source: string | null;
+  provenance: string | null;
+  created_at: string;
 }
 
 export interface ExportRecord {

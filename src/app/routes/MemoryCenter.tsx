@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useProjectStore } from '../stores/useProjectStore';
-import { MEMORY_TYPES } from '../../shared/constants';
-import type { ProjectMemory } from '../../shared/types';
+import { MEMORY_TYPES, LAYER_DEFINITIONS } from '../../shared/constants';
+import type { ProjectMemory, MemoryVersion } from '../../shared/types';
 import * as tauri from '../../shared/utils/tauri';
 
 export default function MemoryCenter() {
@@ -9,6 +9,9 @@ export default function MemoryCenter() {
   const [memories, setMemories] = useState<ProjectMemory[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeType, setActiveType] = useState<string | null>(null);
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const [versions, setVersions] = useState<MemoryVersion[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
 
   useEffect(() => {
     if (currentProject) {
@@ -28,9 +31,32 @@ export default function MemoryCenter() {
     setLoading(false);
   }
 
+  async function handleShowVersions(memoryId: string) {
+    if (selectedMemoryId === memoryId) {
+      setSelectedMemoryId(null);
+      setVersions([]);
+      return;
+    }
+    setSelectedMemoryId(memoryId);
+    setVersionsLoading(true);
+    try {
+      const v = await tauri.getMemoryVersions(memoryId);
+      setVersions(v);
+    } catch (e: any) {
+      console.error('Failed to load versions:', e);
+      setVersions([]);
+    }
+    setVersionsLoading(false);
+  }
+
   function handleTypeFilter(type: string | null) {
     setActiveType(activeType === type ? null : type);
   }
+
+  const layerLabel = (layer: string) => {
+    const def = LAYER_DEFINITIONS.find(d => d.layer === layer);
+    return def ? `${def.layer}: ${def.name}` : layer;
+  };
 
   if (!currentProject) {
     return (
@@ -86,14 +112,41 @@ export default function MemoryCenter() {
         <div key={type} className="memory-section">
           <h3 className="memory-type-title">{type.replace(/_/g, ' ')}</h3>
           {items.map((mem) => (
-            <div key={mem.id} className="card memory-card">
-              <div className="memory-card-header">
-                <span className="memory-key">{mem.key.replace(/_/g, ' ')}</span>
-                <span className="text-sm text-secondary">
-                  {new Date(mem.updated_at).toLocaleDateString()}
-                </span>
+            <div key={mem.id}>
+              <div
+                className="card memory-card"
+                style={{cursor: 'pointer'}}
+                onClick={() => handleShowVersions(mem.id)}
+              >
+                <div className="memory-card-header">
+                  <span className="memory-key">{mem.key.replace(/_/g, ' ')}</span>
+                  <span className="text-sm text-secondary">
+                    {layerLabel(mem.layer)} · v{mem.version} · confidence: {mem.confidence.toFixed(2)}
+                  </span>
+                  <span className="text-sm text-secondary">
+                    {new Date(mem.updated_at).toLocaleDateString()}
+                  </span>
+                </div>
+                <pre className="memory-value">{mem.value}</pre>
               </div>
-              <pre className="memory-value">{mem.value}</pre>
+              {selectedMemoryId === mem.id && (
+                <div className="card" style={{marginLeft: '1rem', marginTop: '-0.5rem', marginBottom: '1rem'}}>
+                  <h4 className="form-title">Revision History ({versions.length})</h4>
+                  {versionsLoading && <p className="text-secondary">Loading...</p>}
+                  {!versionsLoading && versions.length === 0 && (
+                    <p className="text-secondary">No previous versions.</p>
+                  )}
+                  {versions.map((v) => (
+                    <div key={v.id} className="memory-version-item" style={{marginBottom: '0.5rem', padding: '0.5rem', borderLeft: '2px solid var(--primary)'}}>
+                      <div className="text-sm text-secondary">
+                        {new Date(v.created_at).toLocaleString()}
+                        {v.source && ` · source: ${v.source}`}
+                      </div>
+                      <pre style={{fontSize: '0.8rem', maxHeight: '150px', overflow: 'auto', whiteSpace: 'pre-wrap'}}>{v.old_value}</pre>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>

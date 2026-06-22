@@ -178,6 +178,7 @@ pub struct AgentStep {
     pub id: String,
     pub run_id: String,
     pub agent_name: String,
+    pub step_key: String,
     pub step_order: i32,
     pub step_type: String,
     pub input_json: Option<String>,
@@ -299,6 +300,8 @@ pub struct ImprovementProposal {
     pub risk_level: Option<String>,
     pub status: ProposalStatus,
     pub requires_human_approval: bool,
+    pub target_area: Option<String>,
+    pub proposed_change: Option<String>,
     pub created_at: String,
     pub reviewed_at: Option<String>,
 }
@@ -326,6 +329,20 @@ pub struct ExportRecord {
     pub project_id: String,
     pub export_type: String,
     pub file_path: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MemoryVersion {
+    pub id: String,
+    pub memory_id: String,
+    pub project_id: String,
+    pub memory_type: String,
+    pub key: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub source: Option<String>,
+    pub provenance: Option<String>,
     pub created_at: String,
 }
 
@@ -360,6 +377,11 @@ pub struct LlmUsage {
 pub fn sanitize_error(mut message: String) -> String {
     let bearer_re = regex_lite::Regex::new(r"(?i)(bearer\s+)[\w\-\.]+");
     if let Ok(re) = bearer_re {
+        message = re.replace_all(&message, "${1}[REDACTED]").to_string();
+    }
+
+    let auth_re = regex_lite::Regex::new(r#"(?i)(Authorization[=:]\s*['"]?)[^\s,'"]+"#);
+    if let Ok(re) = auth_re {
         message = re.replace_all(&message, "${1}[REDACTED]").to_string();
     }
 

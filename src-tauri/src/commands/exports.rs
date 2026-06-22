@@ -1,3 +1,4 @@
+use crate::commands::events;
 use crate::models::{ExportRecord, MemoryLayer, MemoryScope, ProjectMemory};
 use crate::AppState;
 use tauri::State;
@@ -49,7 +50,10 @@ fn sanitize_project_name(name: &str) -> String {
 }
 
 fn verify_path_within_exports(file_path: &std::path::Path) -> Result<(), String> {
-    let canonical_file = file_path
+    let parent = file_path
+        .parent()
+        .ok_or_else(|| "Export path has no parent directory".to_string())?;
+    let canonical_parent = parent
         .canonicalize()
         .map_err(|e| crate::models::sanitize_error(format!("Path error: {}", e)))?;
     let exports_dir = get_exports_dir()?;
@@ -57,7 +61,7 @@ fn verify_path_within_exports(file_path: &std::path::Path) -> Result<(), String>
         .canonicalize()
         .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
-    if !canonical_file.starts_with(&canonical_exports) {
+    if !canonical_parent.starts_with(&canonical_exports) {
         return Err("Export path is outside the allowed exports directory".to_string());
     }
     Ok(())
@@ -156,6 +160,9 @@ pub fn export_markdown(
     }
 
     let exports_dir = get_exports_dir()?;
+    let canonical_exports = exports_dir
+        .canonicalize()
+        .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
     let safe_name = sanitize_project_name(&project_name);
     let filename = format!(
         "{}-{}.md",
@@ -168,6 +175,14 @@ pub fn export_markdown(
     std::fs::write(&file_path, md)
         .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
+    let canonical_written = file_path
+        .canonicalize()
+        .map_err(|e| crate::models::sanitize_error(format!("Path error: {}", e)))?;
+    if !canonical_written.starts_with(&canonical_exports) {
+        std::fs::remove_file(&file_path).ok();
+        return Err("Export path resolved outside the allowed directory".to_string());
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let file_path_str = file_path.to_string_lossy().to_string();
@@ -177,6 +192,8 @@ pub fn export_markdown(
         rusqlite::params![id, project_id, file_path_str, now],
     )
     .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+
+    log_export_event(&db, &id, &project_id, "markdown", &file_path_str, &now);
 
     Ok(ExportRecord {
         id,
@@ -269,6 +286,9 @@ pub fn export_json(
     });
 
     let exports_dir = get_exports_dir()?;
+    let canonical_exports = exports_dir
+        .canonicalize()
+        .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
     let safe_name = sanitize_project_name(&project_name);
     let filename = format!(
         "{}-{}.json",
@@ -285,6 +305,14 @@ pub fn export_json(
     )
     .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
+    let canonical_written = file_path
+        .canonicalize()
+        .map_err(|e| crate::models::sanitize_error(format!("Path error: {}", e)))?;
+    if !canonical_written.starts_with(&canonical_exports) {
+        std::fs::remove_file(&file_path).ok();
+        return Err("Export path resolved outside the allowed directory".to_string());
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let file_path_str = file_path.to_string_lossy().to_string();
@@ -294,6 +322,8 @@ pub fn export_json(
         rusqlite::params![id, project_id, file_path_str, now],
     )
     .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+
+    log_export_event(&db, &id, &project_id, "json", &file_path_str, &now);
 
     Ok(ExportRecord {
         id,
@@ -334,4 +364,21 @@ pub fn get_exports(
         .map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
     Ok(records)
+}
+
+fn log_export_event(
+    db: &rusqlite::Connection, export_id: &str, project_id: &str,
+    export_type: &str, file_path: &str, now: &str,
+) {
+    let evt_id = uuid::Uuid::new_v4().to_string();
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let data = serde_json::json!({
+        "export_id": export_id,
+        "export_type": export_type,
+        "file_path": file_path,
+    }).to_string();
+    db.execute(
+        "INSERT INTO events (id, project_id, run_id, actor, event_type, event_data, severity, correlation_id, redaction_level, created_at) VALUES (?1,?2,NULL,'system',?3,?4,'info',?5,NULL,?6)",
+        rusqlite::params![evt_id, project_id, events::EVENT_EXPORT_CREATED, crate::models::sanitize_error(data), correlation_id, now],
+    ).ok();
 }

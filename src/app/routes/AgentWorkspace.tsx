@@ -3,13 +3,14 @@ import { useProjectStore } from '../stores/useProjectStore';
 import { useModelStore } from '../stores/useModelStore';
 import { useAgentStore } from '../stores/useAgentStore';
 import { WORKFLOW_TYPES } from '../../shared/constants';
+import type { AgentStep } from '../../shared/types';
 
 export default function AgentWorkspace() {
   const currentProject = useProjectStore((s) => s.currentProject);
   const modelConfig = useModelStore((s) => s.config);
   const {
-    runs, messages, currentRun, running, runStatus, error,
-    loadRuns, loadMessages, runWorkflow, updateMessageStatus,
+    runs, messages, steps, currentRun, running, error,
+    loadRuns, loadRunDetail, runWorkflow, updateMessageStatus, updateMessageContent, clearError,
   } = useAgentStore();
 
   const [workflowType, setWorkflowType] = useState<string>(WORKFLOW_TYPES[0].value);
@@ -35,11 +36,12 @@ export default function AgentWorkspace() {
 
   function handleRunWorkflow() {
     if (!currentProject || !modelConfig) return;
-    runWorkflow(currentProject.id, taskDescription, workflowType, modelConfig);
+    clearError();
+    runWorkflow(currentProject.id, taskDescription, workflowType);
   }
 
   function handleSelectRun(runId: string) {
-    loadMessages(runId);
+    loadRunDetail(runId);
   }
 
   function handleStartEdit(msgId: string, content: string) {
@@ -48,7 +50,7 @@ export default function AgentWorkspace() {
   }
 
   function handleSaveEdit(msgId: string) {
-    updateMessageStatus(msgId, 'edited');
+    updateMessageContent(msgId, editContent);
     setEditingMessageId(null);
     setEditContent('');
   }
@@ -106,7 +108,7 @@ export default function AgentWorkspace() {
           onClick={handleRunWorkflow}
           disabled={running || !modelConfig}
         >
-          {running ? `Running: ${runStatus}` : 'Run Workflow'}
+          {running ? 'Running...' : 'Run Workflow'}
         </button>
       </div>
 
@@ -138,6 +140,15 @@ export default function AgentWorkspace() {
 
       <div className="card">
         <h3 className="form-title">Current Run Output</h3>
+        {steps.length > 0 && (
+          <div className="steps-summary" style={{marginBottom: '1rem', display: 'flex', gap: '0.5rem'}}>
+            {steps.map((step) => (
+              <span key={step.id} className={`status-badge status-${step.status}`}>
+                {step.agent_name} ({step.status})
+              </span>
+            ))}
+          </div>
+        )}
         {messages.length === 0 ? (
           <p className="text-secondary">No messages. Run a workflow to generate output.</p>
         ) : (

@@ -10,8 +10,8 @@ interface ModelStore {
   error: string | null;
 
   loadConfig: () => Promise<void>;
-  saveConfig: (baseUrl: string, apiKey: string, model: string, temperature: number, maxTokens: number) => Promise<void>;
-  testConnection: (baseUrl: string, apiKey: string, model: string) => Promise<boolean>;
+  saveConfig: (baseUrl: string, apiKey: string | null, model: string, temperature: number, maxTokens: number) => Promise<void>;
+  testConnection: (baseUrl: string, apiKey: string | null, model: string) => Promise<boolean>;
 }
 
 export const useModelStore = create<ModelStore>((set) => ({

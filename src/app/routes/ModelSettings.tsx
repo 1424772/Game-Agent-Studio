@@ -28,14 +28,14 @@ export default function ModelSettings() {
     e.preventDefault();
     if (!apiKey && !config?.has_api_key) return;
     setSaving(true);
-    saveConfig(baseUrl, apiKey, model, temperature, maxTokens)
+    saveConfig(baseUrl, apiKey || null, model, temperature, maxTokens)
       .then(() => setApiKey(''))
       .finally(() => setSaving(false));
   }
 
   function handleTest() {
     if (!apiKey && !config?.has_api_key) return;
-    testConnection(baseUrl, apiKey, model);
+    testConnection(baseUrl, apiKey || null, model);
   }
 
   return (
@@ -134,7 +134,7 @@ export default function ModelSettings() {
                 value={maxTokens}
                 onChange={(e) => setMaxTokens(parseInt(e.target.value) || 4096)}
                 min={1}
-                max={131072}
+                max={32768}
               />
             </div>
           </div>

@@ -1,3 +1,4 @@
+use crate::crypto::SecretStore;
 use rusqlite::{Connection, Result};
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
@@ -47,6 +48,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
             agent_name TEXT NOT NULL,
+            step_key TEXT NOT NULL DEFAULT '',
             step_order INTEGER NOT NULL,
             step_type TEXT NOT NULL,
             input_json TEXT,
@@ -156,8 +158,33 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             risk_level TEXT,
             status TEXT NOT NULL DEFAULT 'draft',
             requires_human_approval INTEGER NOT NULL DEFAULT 0,
+            target_area TEXT,
+            proposed_change TEXT,
             created_at TEXT NOT NULL,
             reviewed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS message_revisions (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            original_content TEXT NOT NULL DEFAULT '',
+            edited_content TEXT NOT NULL DEFAULT '',
+            editor TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_versions (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            memory_type TEXT NOT NULL,
+            key TEXT NOT NULL,
+            old_value TEXT NOT NULL DEFAULT '',
+            new_value TEXT NOT NULL DEFAULT '',
+            source TEXT,
+            provenance TEXT,
+            created_at TEXT NOT NULL
         );",
     )?;
 
@@ -207,13 +234,124 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         [],
     ).ok();
 
+    conn.execute(
+        "ALTER TABLE agent_steps ADD COLUMN step_key TEXT NOT NULL DEFAULT ''",
+        [],
+    ).ok();
+
+    migrate_step_key_column(conn)?;
+
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_events_project_created ON events(project_id, created_at);
+        "DROP INDEX IF EXISTS idx_agent_steps_run_step;
+         CREATE INDEX IF NOT EXISTS idx_events_project_created ON events(project_id, created_at);
          CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
+         CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
+         CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at);
+         CREATE INDEX IF NOT EXISTS idx_events_run_created ON events(run_id, created_at);
          CREATE INDEX IF NOT EXISTS idx_agent_messages_run_id ON agent_messages(run_id);
          CREATE INDEX IF NOT EXISTS idx_agent_steps_run_id ON agent_steps(run_id);
-         CREATE INDEX IF NOT EXISTS idx_project_memory_project_type ON project_memory(project_id, memory_type);",
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_steps_run_step_key ON agent_steps(run_id, step_key);
+         CREATE INDEX IF NOT EXISTS idx_project_memory_project_type ON project_memory(project_id, memory_type);
+         CREATE INDEX IF NOT EXISTS idx_memory_versions_memory_id ON memory_versions(memory_id);",
     )?;
+
+    migrate_step_key_column(conn)?;
+    migrate_old_api_key_column(conn)?;
+
+    conn.execute("ALTER TABLE improvement_proposals ADD COLUMN target_area TEXT", []).ok();
+    conn.execute("ALTER TABLE improvement_proposals ADD COLUMN proposed_change TEXT", []).ok();
+
+    Ok(())
+}
+
+fn migrate_step_key_column(conn: &Connection) -> Result<()> {
+    let rows: Vec<(String, String, i32)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, step_type, step_order FROM agent_steps WHERE step_key = '' OR step_key IS NULL")
+            .ok();
+        match stmt {
+            Some(ref mut s) => s
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)?))
+                })
+                .ok()
+                .into_iter()
+                .flat_map(|r| r.filter_map(|r| r.ok()))
+                .collect(),
+            None => return Ok(()),
+        }
+    };
+
+    for (id, step_type, step_order) in rows {
+        let step_key = if step_type.is_empty() {
+            format!("step.{}", step_order)
+        } else {
+            format!("{}.{}", step_type, step_order)
+        };
+        conn.execute(
+            "UPDATE agent_steps SET step_key = ?1 WHERE id = ?2",
+            rusqlite::params![step_key, id],
+        )
+        .ok();
+    }
+
+    Ok(())
+}
+
+fn migrate_old_api_key_column(conn: &Connection) -> Result<()> {
+    let has_encrypted = conn
+        .prepare("SELECT encrypted_api_key FROM model_configs LIMIT 0")
+        .is_ok();
+
+    if !has_encrypted {
+        conn.execute(
+            "ALTER TABLE model_configs ADD COLUMN encrypted_api_key TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok();
+    }
+
+    let has_old_api_key: bool = conn
+        .prepare("SELECT api_key FROM model_configs LIMIT 0")
+        .is_ok();
+
+    if !has_old_api_key {
+        return Ok(());
+    }
+
+    let store = crate::crypto::LocalEncryptedSecretStore::new();
+
+    let mut stmt = conn
+        .prepare("SELECT id, api_key, encrypted_api_key FROM model_configs")
+        .ok();
+
+    if let Some(ref mut stmt) = stmt {
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                ))
+            })
+            .ok()
+            .into_iter()
+            .flat_map(|r| r.filter_map(|r| r.ok()))
+            .collect();
+
+        for (id, plaintext_key, encrypted_key) in rows {
+            if plaintext_key.is_empty() || !encrypted_key.is_empty() {
+                continue;
+            }
+            if let Ok(enc) = store.encrypt(&plaintext_key) {
+                conn.execute(
+                    "UPDATE model_configs SET encrypted_api_key = ?1 WHERE id = ?2",
+                    rusqlite::params![enc, id],
+                )
+                .ok();
+            }
+        }
+    }
 
     Ok(())
 }

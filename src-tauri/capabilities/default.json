@@ -1,9 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window",
+  "description": "No Tauri plugin permissions. Only custom invoke commands are allowed via the IPC bridge. Shell, FS, dialog, clipboard, notification, and all other plugin APIs are blocked.",
   "windows": ["main"],
-  "permissions": [
-    "core:default"
-  ]
+  "permissions": []
 }

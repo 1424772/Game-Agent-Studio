@@ -8,11 +8,16 @@ use sha2::{Digest, Sha256};
 
 const NONCE_LEN: usize = 12;
 
-pub struct SecretStore {
+pub trait SecretStore {
+    fn encrypt(&self, plaintext: &str) -> Result<String, String>;
+    fn decrypt(&self, encoded: &str) -> Result<String, String>;
+}
+
+pub struct LocalEncryptedSecretStore {
     cipher: Aes256Gcm,
 }
 
-impl SecretStore {
+impl LocalEncryptedSecretStore {
     pub fn new() -> Self {
         let hostname = hostname::get()
             .unwrap_or_default()
@@ -27,10 +32,12 @@ impl SecretStore {
         key.copy_from_slice(&hash);
 
         let cipher = Aes256Gcm::new_from_slice(&key).expect("Valid key length");
-        SecretStore { cipher }
+        LocalEncryptedSecretStore { cipher }
     }
+}
 
-    pub fn encrypt(&self, plaintext: &str) -> Result<String, String> {
+impl SecretStore for LocalEncryptedSecretStore {
+    fn encrypt(&self, plaintext: &str) -> Result<String, String> {
         let mut nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -45,7 +52,7 @@ impl SecretStore {
         Ok(BASE64.encode(&combined))
     }
 
-    pub fn decrypt(&self, encoded: &str) -> Result<String, String> {
+    fn decrypt(&self, encoded: &str) -> Result<String, String> {
         let data = BASE64
             .decode(encoded)
             .map_err(|e| format!("Decode failed: {}", e))?;
@@ -64,4 +71,26 @@ impl SecretStore {
 
         String::from_utf8(plaintext).map_err(|e| format!("UTF-8 error: {}", e))
     }
+}
+
+pub struct KeychainSecretStore;
+
+impl KeychainSecretStore {
+    pub fn new() -> Self {
+        KeychainSecretStore
+    }
+}
+
+impl SecretStore for KeychainSecretStore {
+    fn encrypt(&self, _plaintext: &str) -> Result<String, String> {
+        Err("KeychainSecretStore: OS keychain not yet implemented. Use LocalEncryptedSecretStore.".to_string())
+    }
+
+    fn decrypt(&self, _encoded: &str) -> Result<String, String> {
+        Err("KeychainSecretStore: OS keychain not yet implemented. Use LocalEncryptedSecretStore.".to_string())
+    }
+}
+
+pub fn create_secret_store() -> impl SecretStore {
+    LocalEncryptedSecretStore::new()
 }
