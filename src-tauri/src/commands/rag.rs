@@ -7,6 +7,7 @@ const CHUNK_SIZE: usize = 2000;
 const MIN_LIMIT: i32 = 1;
 const MAX_LIMIT: i32 = 20;
 
+#[derive(Debug)]
 pub struct RetrievalResult {
     pub run: RetrievalRun,
     pub hits: Vec<RetrievalHit>,
@@ -301,4 +302,88 @@ pub fn get_retrieval_hit_excerpts(
         })
     }).map_err(|e| crate::models::sanitize_error(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrieve_empty_query_rejected() {
+        let r = retrieve_for_context(
+            &mut rusqlite::Connection::open_in_memory().unwrap(),
+            "test", "", 5, None,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("not be empty"));
+    }
+
+    #[test]
+    fn retrieve_long_query_rejected() {
+        let long = "a".repeat(501);
+        let r = retrieve_for_context(
+            &mut rusqlite::Connection::open_in_memory().unwrap(),
+            "test", &long, 5, None,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("max 500"));
+    }
+
+    #[test]
+    fn retrieve_too_many_words_rejected() {
+        let q = (0..25).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" ");
+        let r = retrieve_for_context(
+            &mut rusqlite::Connection::open_in_memory().unwrap(),
+            "test", &q, 5, None,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("Maximum is 20"));
+    }
+
+    #[test]
+    fn limit_clamped_to_range() {
+        assert_eq!(0_i32.clamp(MIN_LIMIT, MAX_LIMIT), 1);
+        assert_eq!((-5_i32).clamp(MIN_LIMIT, MAX_LIMIT), 1);
+        assert_eq!(100_i32.clamp(MIN_LIMIT, MAX_LIMIT), 20);
+    }
+
+    // ── DB-level tests with in-memory SQLite ──
+
+    fn setup_rag_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, content TEXT, doc_type TEXT, source_path TEXT, chunk_count INTEGER, created_at TEXT);
+             CREATE TABLE document_chunks (id TEXT PRIMARY KEY, document_id TEXT, chunk_index INTEGER, content TEXT, embedding_json TEXT, metadata TEXT, created_at TEXT);
+             CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, project_id TEXT, query_text TEXT, rewritten_queries TEXT, strategy TEXT, result_count INTEGER, duration_ms BIGINT, created_at TEXT);
+             CREATE TABLE retrieval_hits (id TEXT PRIMARY KEY, retrieval_run_id TEXT, chunk_id TEXT, score REAL, rank INTEGER, used_by_agent TEXT, created_at TEXT);"
+        ).unwrap();
+        conn
+    }
+
+    #[test]
+    fn retrieve_writes_used_by_agent() {
+        let mut db = setup_rag_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute("INSERT INTO documents (id,project_id,title,content,doc_type,chunk_count,created_at) VALUES ('d1','proj1','Test Doc','hello world','game_design',0,?1)", rusqlite::params![now]).unwrap();
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,created_at) VALUES ('c1','d1',1,'hello world example content for search testing',?1)", rusqlite::params![now]).unwrap();
+
+        let result = retrieve_for_context(
+            &mut db, "proj1", "hello search", 5,
+            Some(("run-1", "qa.review", "QAAgent")),
+        ).unwrap();
+
+        assert_eq!(result.run.query_text, "hello search");
+        assert!(!result.hits.is_empty());
+        for hit in &result.hits {
+            let used = hit.used_by_agent.as_ref().unwrap();
+            assert!(used.contains("run-1"));
+            assert!(used.contains("qa.review"));
+            assert!(used.contains("QAAgent"));
+        }
+
+        let db_count: i32 = db.query_row("SELECT COUNT(*) FROM retrieval_runs", [], |r| r.get(0)).unwrap();
+        assert!(db_count >= 1);
+        let hit_count: i32 = db.query_row("SELECT COUNT(*) FROM retrieval_hits WHERE used_by_agent IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert!(hit_count >= 1);
+    }
 }

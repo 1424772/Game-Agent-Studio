@@ -382,3 +382,60 @@ fn log_export_event(
         rusqlite::params![evt_id, project_id, events::EVENT_EXPORT_CREATED, crate::models::sanitize_error(data), correlation_id, now],
     ).ok();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_project_name_removes_path_separators() {
+        let name = sanitize_project_name("my/game\\project");
+        assert!(!name.contains('/'));
+        assert!(!name.contains('\\'));
+        assert!(name.contains("my-game-project"));
+    }
+
+    #[test]
+    fn sanitize_project_name_handles_empty() {
+        assert_eq!(sanitize_project_name(""), "untitled");
+    }
+
+    #[test]
+    fn sanitize_project_name_rejects_reserved_names() {
+        let name = sanitize_project_name("CON");
+        assert_ne!(name, "CON");
+        assert!(name.starts_with('_'));
+    }
+
+    #[test]
+    fn is_sensitive_memory_type_filters() {
+        assert!(is_sensitive_memory_type("qa_review"));
+        assert!(is_sensitive_memory_type("system_internal"));
+        assert!(!is_sensitive_memory_type("world_setting"));
+        assert!(!is_sensitive_memory_type("character"));
+    }
+
+    #[test]
+    fn exports_dir_is_within_app_data() {
+        let dir = get_exports_dir().unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        let path_str = canonical.to_string_lossy().to_lowercase();
+        assert!(path_str.contains("game-agent-studio"));
+        assert!(path_str.contains("exports"));
+    }
+
+    #[test]
+    fn verify_path_within_exports_allows_valid_path() {
+        let exports = get_exports_dir().unwrap();
+        std::fs::create_dir_all(&exports).unwrap();
+        let valid = exports.join("safe-file.md");
+        assert!(verify_path_within_exports(&valid).is_ok());
+    }
+
+    #[test]
+    fn verify_path_within_exports_rejects_outside_path() {
+        let outside = std::path::PathBuf::from("C:\\Windows\\outside.md");
+        let r = verify_path_within_exports(&outside);
+        assert!(r.is_err(), "should reject path outside exports dir, got {:?}", r);
+    }
+}

@@ -686,4 +686,60 @@ mod tests {
         assert!(validate_max_tokens(32769).is_err());
         assert!(validate_max_tokens(131072).is_err());
     }
+
+    // ============================================================
+    // sanitize_error coverage
+    // ============================================================
+
+    #[test]
+    fn sanitize_bearer_token() {
+        let input = "Authorization: Bearer sk-abc123def456ghij789".to_string();
+        let output = crate::models::sanitize_error(input);
+        assert!(!output.contains("sk-abc123"));
+        assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn sanitize_authorization_header() {
+        let input = "Authorization: secret-value-here".to_string();
+        let output = crate::models::sanitize_error(input);
+        assert!(output.contains("[REDACTED]"));
+        assert!(!output.contains("secret-value-here"));
+    }
+
+    #[test]
+    fn sanitize_api_key_param() {
+        let input = "api_key=sk-mysecretkey123".to_string();
+        let output = crate::models::sanitize_error(input);
+        assert!(output.contains("[REDACTED]"));
+        assert!(!output.contains("mysecretkey"));
+    }
+
+    #[test]
+    fn sanitize_sk_prefix() {
+        let input = "Error: sk-proj-1234567890abcdefghij".to_string();
+        let output = crate::models::sanitize_error(input);
+        assert!(output.contains("[REDACTED]"));
+        assert!(!output.contains("sk-proj-1234"));
+    }
+
+    #[test]
+    fn sanitize_clean_text_passes_through() {
+        let input = "Normal error message without secrets".to_string();
+        let output = crate::models::sanitize_error(input.clone());
+        assert_eq!(input, output);
+    }
+
+    // ============================================================
+    // LLM request validation
+    // ============================================================
+
+    #[test]
+    fn validate_llm_request_limits() {
+        assert!(validate_llm_request(1, 100, 4096).is_ok());
+        assert!(validate_llm_request(20, 40000, 32768).is_ok());
+        assert!(validate_llm_request(21, 100, 4096).is_err(), "too many messages");
+        assert!(validate_llm_request(1, 50000, 4096).is_err(), "too many chars");
+        assert!(validate_llm_request(1, 100, 32769).is_err(), "tokens over cap");
+    }
 }
