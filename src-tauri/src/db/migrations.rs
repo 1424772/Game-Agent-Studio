@@ -125,6 +125,13 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             chunk_index INTEGER NOT NULL,
             content TEXT NOT NULL DEFAULT '',
             embedding_json TEXT,
+            embedding_model TEXT,
+            embedding_provider TEXT,
+            embedding_dim INTEGER,
+            embedding_version INTEGER DEFAULT 1,
+            embedded_at TEXT,
+            embedding_status TEXT DEFAULT 'pending',
+            embedding_error TEXT,
             metadata TEXT,
             created_at TEXT NOT NULL
         );
@@ -147,6 +154,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             score REAL NOT NULL DEFAULT 0.0,
             rank INTEGER NOT NULL DEFAULT 0,
             used_by_agent TEXT,
+            score_breakdown TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -252,7 +260,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_agent_steps_run_id ON agent_steps(run_id);
          CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_steps_run_step_key ON agent_steps(run_id, step_key);
          CREATE INDEX IF NOT EXISTS idx_project_memory_project_type ON project_memory(project_id, memory_type);
-         CREATE INDEX IF NOT EXISTS idx_memory_versions_memory_id ON memory_versions(memory_id);",
+         CREATE INDEX IF NOT EXISTS idx_memory_versions_memory_id ON memory_versions(memory_id);
+         CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_id ON document_chunks(document_id);
+         CREATE INDEX IF NOT EXISTS idx_document_chunks_embed_status ON document_chunks(embedding_status);",
     )?;
 
     migrate_step_key_column(conn)?;
@@ -260,6 +270,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     conn.execute("ALTER TABLE improvement_proposals ADD COLUMN target_area TEXT", []).ok();
     conn.execute("ALTER TABLE improvement_proposals ADD COLUMN proposed_change TEXT", []).ok();
+
+    // P8: embedding columns on document_chunks
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding_model TEXT", []).ok();
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding_provider TEXT", []).ok();
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding_dim INTEGER", []).ok();
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding_version INTEGER DEFAULT 1", []).ok();
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedded_at TEXT", []).ok();
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding_status TEXT DEFAULT 'pending'", []).ok();
+    conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding_error TEXT", []).ok();
+
+    conn.execute("ALTER TABLE retrieval_hits ADD COLUMN score_breakdown TEXT", []).ok();
 
     migrate_keychain_api_key(conn);
 
@@ -501,5 +522,21 @@ mod tests {
         let s: String = db.query_row("SELECT encrypted_api_key FROM model_configs WHERE id='c1'", [], |r| r.get(0)).unwrap();
         assert_eq!(s, ct, "old ciphertext must survive marker update failure");
         assert_eq!(crate::crypto::decrypt_saved_api_key(&s).unwrap(), "sk-legacy-key");
+    }
+
+    #[test]
+    fn fresh_migration_creates_all_embedding_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Verify all P8 embedding columns exist
+        let cols: Vec<String> = conn.prepare("PRAGMA table_info(document_chunks)").unwrap()
+            .query_map([], |r| r.get::<_,String>(1))
+            .unwrap().filter_map(|r| r.ok()).collect();
+        assert!(cols.contains(&"embedding_json".to_string()));
+        assert!(cols.contains(&"embedding_model".to_string()));
+        assert!(cols.contains(&"embedding_status".to_string()));
+        assert!(cols.contains(&"embedding_error".to_string()));
+        assert!(cols.contains(&"embedding_dim".to_string()));
+        assert!(cols.contains(&"embedded_at".to_string()));
     }
 }

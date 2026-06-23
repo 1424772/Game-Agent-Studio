@@ -339,10 +339,14 @@ pub async fn run_workflow(
         }
     }
 
-    let (model, temperature, max_tokens) = {
+    let (model, temperature, max_tokens, emb_base_url, emb_api_key, emb_model) = {
         let db = state.db.lock().map_err(|e| sanitize_error(e.to_string()))?;
-        db.query_row("SELECT model, temperature, max_tokens FROM model_configs LIMIT 1", [], |row| Ok((row.get::<_,String>(0)?, row.get::<_,f64>(1)?, row.get::<_,u32>(2)?)))
-        .map_err(|e| sanitize_error(e.to_string()))?
+        let m: String = db.query_row("SELECT model FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or_default();
+        let t: f64 = db.query_row("SELECT temperature FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or(0.7);
+        let mt: u32 = db.query_row("SELECT max_tokens FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or(4096);
+        let bu: String = db.query_row("SELECT base_url FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or_default();
+        let ek: String = db.query_row("SELECT encrypted_api_key FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or_default();
+        (m, t, mt, bu, ek, "text-embedding-3-small".to_string())
     };
 
     let correlation_id = uuid::Uuid::new_v4().to_string();
@@ -371,33 +375,64 @@ pub async fn run_workflow(
             .replace("{previous_output}", &previous_output);
 
         let (mut final_user_prompt, mut retrieval_run_id, mut retrieval_hits_json) = (user_prompt.clone(), None, serde_json::json!([]));
+        let mut strategy = "keyword";
 
         if step.use_rag {
-            let mut db = state.db.lock().map_err(|e| sanitize_error(e.to_string()))?;
             let rag_query = format!("{} {}", task_description, previous_output);
+            let (query_emb, is_fallback) = {
+                let api_key = decrypt_saved_api_key(&emb_api_key).ok();
+                let url_ok = !emb_base_url.is_empty() && crate::commands::security::validate_base_url(&emb_base_url).is_ok();
+                if let (Some(key), true) = (api_key.as_ref(), url_ok) {
+                    match crate::commands::embedding::embed_query(&emb_base_url, key, &emb_model, &rag_query).await {
+                        Ok(vec) => (Some(vec), false),
+                        Err(e) => {
+                            log_workflow_event(&state, &project_id, &run_id, "step_rag_embed_failed",
+                                &serde_json::json!({"step_key": step.step_key, "error": sanitize_error(e)}).to_string(),
+                                &correlation_id, "warning")?;
+                            (None, true)
+                        }
+                    }
+                } else {
+                    log_workflow_event(&state, &project_id, &run_id, "step_rag_fallback",
+                        &serde_json::json!({"step_key": step.step_key, "reason": if !url_ok {"invalid_base_url"} else {"no_api_key"}}).to_string(),
+                        &correlation_id, "info")?;
+                    (None, true)
+                }
+            };
+
+            let strategy = if query_emb.is_some() { "hybrid" } else { "keyword_fallback" };
+            let mut db = state.db.lock().map_err(|e| sanitize_error(e.to_string()))?;
             match rag::retrieve_for_context(&mut db, &project_id, &rag_query, 5,
                 Some((&run_id, step.step_key, step.agent_name)),
+                query_emb.as_deref(),
+                Some(strategy),
             ) {
                 Ok(result) => {
                     let mut hits_entries = Vec::new();
                     let context: Vec<String> = result.excerpts.iter().map(|(chunk_id, title, excerpt)| {
                         let sanitized = crate::models::sanitize_error(excerpt.clone());
                         hits_entries.push(serde_json::json!({
-                            "hit_id": "",
-                            "chunk_id": chunk_id,
-                            "doc_title": title,
-                            "excerpt": sanitized,
-                            "score": 0.0,
-                            "rank": 0,
+                            "hit_id": "", "chunk_id": chunk_id, "doc_title": title,
+                            "excerpt": sanitized, "score": 0.0, "rank": 0,
+                            "source": null, "provenance": null, "score_breakdown": null,
                         }));
                         format!("[Source: {}] {}", title, sanitized)
                     }).collect();
-                    // merge scores/ranks from hits
                     for (i, hit) in result.hits.iter().enumerate() {
                         if i < hits_entries.len() {
                             hits_entries[i]["hit_id"] = serde_json::json!(hit.id);
                             hits_entries[i]["score"] = serde_json::json!(hit.score);
                             hits_entries[i]["rank"] = serde_json::json!(hit.rank);
+                            hits_entries[i]["score_breakdown"] = serde_json::json!(hit.score_breakdown);
+                            // Query chunk metadata for source/provenance
+                            if let Ok(meta_str) = db.query_row("SELECT metadata FROM document_chunks WHERE id=?1", rusqlite::params![hit.chunk_id], |r| r.get::<_,Option<String>>(0)) {
+                                if let Some(ref m) = meta_str {
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(m) {
+                                        hits_entries[i]["source"] = v.get("source").cloned().unwrap_or(serde_json::Value::Null);
+                                        hits_entries[i]["provenance"] = v.get("provenance").cloned().unwrap_or(serde_json::Value::Null);
+                                    }
+                                }
+                            }
                         }
                     }
                     if !context.is_empty() {
@@ -405,21 +440,26 @@ pub async fn run_workflow(
                             final_user_prompt, context.join("\n---\n"));
                     }
                     retrieval_run_id = Some(result.run.id);
-                    retrieval_hits_json = serde_json::json!(hits_entries);
+                    retrieval_hits_json = serde_json::json!({"strategy": strategy, "hits": hits_entries});
                 }
                 Err(_) => {}
             }
         }
 
-        let input = serde_json::json!({
-            "step_key": step.step_key,
-            "agent_name": step.agent_name,
-            "system": step.system_prompt,
-            "user": &final_user_prompt,
-            "retrieval_run_id": retrieval_run_id,
-            "retrieval_hits": retrieval_hits_json,
-            "use_rag": step.use_rag,
-        }).to_string();
+            let retrieval_meta = serde_json::json!({
+                "retrieval_run_id": retrieval_run_id,
+                "strategy": strategy,
+                "hits": retrieval_hits_json,
+            });
+
+            let input = serde_json::json!({
+                "step_key": step.step_key,
+                "agent_name": step.agent_name,
+                "system": step.system_prompt,
+                "user": &final_user_prompt,
+                "retrieval": retrieval_meta,
+                "use_rag": step.use_rag,
+            }).to_string();
 
         save_agent_step(state.clone(), run_id.clone(), step.agent_name.to_string(),
             step.step_key.to_string(), step.step_order, step.step_type.to_string(),
@@ -438,9 +478,9 @@ pub async fn run_workflow(
         }).await {
             Ok(response) => {
                 save_agent_message(state.clone(), run_id.clone(), step.agent_name.to_string(), "system".to_string(),
-                    step.system_prompt.to_string(), Some(serde_json::json!({"step_key": step.step_key, "agent_role": agent_role, "retrieval_run_id": retrieval_run_id}).to_string()))?;
+                    step.system_prompt.to_string(), Some(serde_json::json!({"step_key": step.step_key, "agent_role": agent_role, "retrieval": retrieval_meta}).to_string()))?;
                 save_agent_message(state.clone(), run_id.clone(), step.agent_name.to_string(), "assistant".to_string(),
-                    response.content.clone(), Some(serde_json::json!({"step_key": step.step_key, "agent_role": agent_role, "usage": response.usage, "retrieval_run_id": retrieval_run_id}).to_string()))?;
+                    response.content.clone(), Some(serde_json::json!({"step_key": step.step_key, "agent_role": agent_role, "usage": response.usage, "retrieval": retrieval_meta}).to_string()))?;
 
                 save_agent_step(state.clone(), run_id.clone(), step.agent_name.to_string(),
                     step.step_key.to_string(), step.step_order, step.step_type.to_string(),

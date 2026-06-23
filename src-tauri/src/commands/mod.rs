@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod embedding;
 pub mod events;
 pub mod exports;
 pub mod iterations;

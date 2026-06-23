@@ -264,6 +264,13 @@ pub struct DocumentChunk {
     pub chunk_index: i32,
     pub content: String,
     pub embedding_json: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_provider: Option<String>,
+    pub embedding_dim: Option<i32>,
+    pub embedding_version: Option<i32>,
+    pub embedded_at: Option<String>,
+    pub embedding_status: Option<String>,
+    pub embedding_error: Option<String>,
     pub metadata: Option<String>,
     pub created_at: String,
 }
@@ -288,6 +295,7 @@ pub struct RetrievalHit {
     pub score: f64,
     pub rank: i32,
     pub used_by_agent: Option<String>,
+    pub score_breakdown: Option<String>,
     pub created_at: String,
 }
 

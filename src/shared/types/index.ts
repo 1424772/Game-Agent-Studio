@@ -131,6 +131,13 @@ export interface DocumentChunk {
   chunk_index: number;
   content: string;
   embedding_json: string | null;
+  embedding_model: string | null;
+  embedding_provider: string | null;
+  embedding_dim: number | null;
+  embedding_version: number | null;
+  embedded_at: string | null;
+  embedding_status: string | null;
+  embedding_error: string | null;
   metadata: string | null;
   created_at: string;
 }
@@ -157,6 +164,7 @@ export interface HitExcerpt {
   doc_title: string;
   doc_type: string;
   chunk_excerpt: string;
+  score_breakdown: string | null;
   source: string | null;
   provenance: string | null;
 }
@@ -168,6 +176,7 @@ export interface RetrievalHit {
   score: number;
   rank: number;
   used_by_agent: string | null;
+  score_breakdown: string | null;
   created_at: string;
 }
 

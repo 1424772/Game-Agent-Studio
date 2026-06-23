@@ -139,7 +139,7 @@
 
 ## Known Limitations
 
-- Keyword-only search (no vector/embedding)
+- **Keyword + hybrid (vector cosine similarity) RAG search** — V1 supports both keyword and vector retrieval
 - No streaming LLM responses
 - `LocalEncryptedSecretStore` fallback on Linux when DBus/Secret Service unavailable
 - `cargo test --lib` runtime requires clean MinGW or MSVC + WebView2 Runtime

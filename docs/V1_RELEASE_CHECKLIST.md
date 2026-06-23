@@ -52,7 +52,7 @@ npm run tauri build
 ## Known Limitations (V1)
 
 - **No streaming LLM responses** — all API calls are synchronous batch
-- **Keyword-only RAG search** — no vector/embedding retrieval yet
+- **Keyword + hybrid (vector cosine similarity) RAG search**
 - **No workflow editor** — workflows are defined as static Rust constants
 - **Template exports deferred** — Godot/Ren'Py/Phaser project export not implemented
 - **OS Keychain**: Windows/macOS use native credential manager via `keyring` crate. Linux uses Secret Service; if DBus unavailable, falls back to `LocalEncryptedSecretStore` (AES-256-GCM with hostname-derived key). Migration from legacy encrypted key to keychain happens on first launch after upgrade.

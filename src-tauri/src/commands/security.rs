@@ -211,6 +211,7 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "create_improvement_proposal",
     "create_project",
     "delete_project",
+    "embed_pending_chunks",
     "export_json",
     "export_markdown",
     "get_agent_messages",

@@ -18,6 +18,7 @@ pub const HANDLER_NAMES: &[&str] = &[
     "create_improvement_proposal",
     "create_project",
     "delete_project",
+    "embed_pending_chunks",
     "export_json",
     "export_markdown",
     "get_agent_messages",
@@ -105,6 +106,7 @@ pub fn run() {
             commands::rag::get_retrieval_runs,
             commands::rag::get_retrieval_hits,
             commands::rag::get_retrieval_hit_excerpts,
+            commands::rag::embed_pending_chunks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -138,7 +140,7 @@ mod tests {
 
     #[test]
     fn handler_names_count_matches_generate_handler() {
-        // generate_handler! has 40 entries. If you add/remove one, update this + HANDLER_NAMES.
-        assert_eq!(HANDLER_NAMES.len(), 40, "HANDLER_NAMES count must match generate_handler![] entry count");
+        // generate_handler! has 41 entries. If you add/remove one, update this + HANDLER_NAMES.
+        assert_eq!(HANDLER_NAMES.len(), 41, "HANDLER_NAMES count must match generate_handler![] entry count");
     }
 }

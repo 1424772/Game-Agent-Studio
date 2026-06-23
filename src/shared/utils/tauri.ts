@@ -154,6 +154,9 @@ export async function getRetrievalHits(retrievalRunId: string): Promise<Retrieva
 export async function getRetrievalHitExcerpts(retrievalRunId: string): Promise<HitExcerpt[]> {
   return invoke('get_retrieval_hit_excerpts', { retrievalRunId });
 }
+export async function embedPendingChunks(projectId: string, limit?: number): Promise<number> {
+  return invoke('embed_pending_chunks', { projectId, limit: limit || 10 });
+}
 
 // --- Project Memory ---
 export async function getProjectMemory(projectId: string, memoryType?: string): Promise<ProjectMemory[]> {

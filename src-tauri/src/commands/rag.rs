@@ -18,7 +18,9 @@ pub struct RetrievalResult {
 /// Called by both the UI command and the agent workflow engine.
 pub fn retrieve_for_context(
     db: &mut rusqlite::Connection, project_id: &str, query: &str, limit: i32,
-    usage_context: Option<(&str, &str, &str)>, // (run_id, step_key, agent_name)
+    usage_context: Option<(&str, &str, &str)>,
+    query_embedding: Option<&[f64]>,
+    force_strategy: Option<&str>,
 ) -> Result<RetrievalResult, String> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -73,6 +75,47 @@ pub fn retrieve_for_context(
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(lim as usize);
 
+    let mut strategy = force_strategy.unwrap_or("keyword").to_string();
+    let has_vector = query_embedding.map_or(false, |v| !v.is_empty());
+    if !has_vector && (strategy == "hybrid" || strategy == "vector") { strategy = "keyword_fallback".to_string(); }
+    if !has_vector && strategy != "vector" && strategy != "hybrid" && strategy != "keyword_fallback" { strategy = "keyword".to_string(); }
+
+    let mut _owned_scored: Vec<(String, String, i32, String, Option<String>, String, String)> = Vec::new();
+    if has_vector && (strategy == "hybrid" || strategy == "vector") {
+        let qv = query_embedding.unwrap();
+        // For hybrid: merge keyword + vector; for vector: only vector candidates
+        let mut kw_scored: Vec<(f64, (String, String, i32, String, Option<String>, String, String))> = if strategy == "hybrid" {
+            scored.iter().map(|(ks, item)| {
+                let vs = db.query_row("SELECT embedding_json FROM document_chunks WHERE id=?1", rusqlite::params![item.0], |r| r.get::<_,Option<String>>(0))
+                    .ok().flatten().and_then(|s| serde_json::from_str::<Vec<f64>>(&s).ok())
+                    .map(|cv| crate::commands::embedding::cosine_similarity(qv, &cv)).unwrap_or(0.0);
+                ((*ks).min(1.0) * 0.3 + vs * 0.7, (item.0.clone(), item.1.clone(), item.2, item.3.clone(), item.4.clone(), item.5.clone(), item.6.clone()))
+            }).collect()
+        } else { Vec::new() };
+        // Vector candidates
+        let kw_ids: std::collections::HashSet<String> = scored.iter().map(|(_, item)| item.0.clone()).collect();
+        let vec_sql = "SELECT c.id, c.document_id, c.chunk_index, c.content, c.metadata, d.title, d.doc_type, c.embedding_json FROM document_chunks c JOIN documents d ON c.document_id=d.id WHERE d.project_id=?1 AND c.embedding_json IS NOT NULL AND c.embedding_json != ''";
+        let vec_rows: Vec<(String, String, i32, String, Option<String>, String, String, String)> = db.prepare(vec_sql)
+            .map_err(|e| crate::models::sanitize_error(e.to_string()))?
+            .query_map(rusqlite::params![project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4).ok(), r.get(5)?, r.get(6)?, r.get(7)?)))
+            .map_err(|e| crate::models::sanitize_error(e.to_string()))?
+            .filter_map(|r| r.ok()).collect();
+        for (cid, did, idx, content, meta, title, dtype, emb_json) in &vec_rows {
+            if strategy == "vector" || !kw_ids.contains(cid) {
+                if let Ok(vec) = serde_json::from_str::<Vec<f64>>(emb_json) {
+                    let vs = crate::commands::embedding::cosine_similarity(qv, &vec);
+                    if vs > (if strategy == "vector" { 0.3 } else { 0.5 }) {
+                        kw_scored.push((vs, (cid.clone(), did.clone(), *idx, content.clone(), meta.clone(), title.clone(), dtype.clone())));
+                    }
+                }
+            }
+        }
+        kw_scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        kw_scored.truncate(lim as usize);
+        _owned_scored = kw_scored.iter().map(|(_, item)| item.clone()).collect();
+        scored = kw_scored.iter().zip(_owned_scored.iter()).map(|((s, _), item)| (*s, item)).collect();
+    }
+
     let duration_ms = start.elapsed().as_millis() as i64;
     let hit_count = scored.len() as i32;
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -81,11 +124,21 @@ pub fn retrieve_for_context(
         serde_json::json!({"run_id": rid, "step_key": sk, "agent_name": an}).to_string()
     });
 
+    // Pre-fetch embeddings for hybrid scoring (before transaction borrows db)
+    let chunk_embeddings: std::collections::HashMap<String, Option<Vec<f64>>> = if query_embedding.is_some() {
+        let mut map = std::collections::HashMap::new();
+        for (_score, item) in &scored {
+            let emb = db.query_row("SELECT embedding_json FROM document_chunks WHERE id=?1", rusqlite::params![item.0], |r| r.get::<_,Option<String>>(0)).ok().flatten().and_then(|s| serde_json::from_str(&s).ok());
+            map.insert(item.0.clone(), emb);
+        }
+        map
+    } else { std::collections::HashMap::new() };
+
     let tx = db.transaction().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
     tx.execute(
-        "INSERT INTO retrieval_runs (id, project_id, query_text, rewritten_queries, strategy, result_count, duration_ms, created_at) VALUES (?1,?2,?3,NULL,'keyword',?4,?5,?6)",
-        rusqlite::params![run_id, project_id, trimmed, hit_count, duration_ms, now],
+        "INSERT INTO retrieval_runs (id, project_id, query_text, rewritten_queries, strategy, result_count, duration_ms, created_at) VALUES (?1,?2,?3,NULL,?4,?5,?6,?7)",
+        rusqlite::params![run_id, project_id, trimmed, strategy, hit_count, duration_ms, now],
     ).map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
     let mut hits = Vec::new();
@@ -95,15 +148,22 @@ pub fn retrieve_for_context(
         let hit_id = uuid::Uuid::new_v4().to_string();
         let excerpt: String = crate::models::sanitize_error(item.3.chars().take(300).collect());
         let used = usage_meta.clone();
+        let breakthrough = if query_embedding.is_some() {
+            let vec_s = chunk_embeddings.get(&item.0).and_then(|e| e.as_ref())
+                .map(|cv| crate::commands::embedding::cosine_similarity(query_embedding.unwrap(), cv)).unwrap_or(0.0);
+            let kw_s = score_words.iter().filter(|w| item.3.to_lowercase().contains(w.as_str())).count() as f64;
+            Some(serde_json::json!({"keyword": kw_s, "vector": vec_s, "final": *score}).to_string())
+        } else { None };
 
         tx.execute(
-            "INSERT INTO retrieval_hits (id, retrieval_run_id, chunk_id, score, rank, used_by_agent, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            rusqlite::params![hit_id, run_id, item.0, score, rank as i32, used, now],
+            "INSERT INTO retrieval_hits (id, retrieval_run_id, chunk_id, score, rank, used_by_agent, score_breakdown, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![hit_id, run_id, item.0, score, rank as i32, used, breakthrough, now],
         ).map_err(|e| crate::models::sanitize_error(e.to_string()))?;
 
         hits.push(RetrievalHit {
             id: hit_id.clone(), retrieval_run_id: run_id.clone(), chunk_id: item.0.clone(),
-            score: *score, rank: rank as i32, used_by_agent: used.clone(), created_at: now.clone(),
+            score: *score, rank: rank as i32, used_by_agent: used.clone(),
+            score_breakdown: breakthrough, created_at: now.clone(),
         });
         excerpts.push((item.0.clone(), item.5.clone(), excerpt));
     }
@@ -112,16 +172,16 @@ pub fn retrieve_for_context(
 
     let run = RetrievalRun {
         id: run_id, project_id: project_id.to_string(), query_text: trimmed.to_string(),
-        rewritten_queries: None, strategy: Some("keyword".into()),
+        rewritten_queries: None, strategy: Some(strategy.clone()),
         result_count: hit_count, duration_ms, created_at: now,
     };
 
     Ok(RetrievalResult { run, hits, excerpts })
 }
 
-// ════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 // Tauri Commands
-// ════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 
 #[tauri::command]
 pub fn create_document(
@@ -230,8 +290,8 @@ pub fn list_documents(state: State<AppState>, project_id: String) -> Result<Vec<
 #[tauri::command]
 pub fn get_document_chunks(state: State<AppState>, document_id: String) -> Result<Vec<DocumentChunk>, String> {
     let db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
-    let mut stmt = db.prepare("SELECT id,document_id,chunk_index,content,embedding_json,metadata,created_at FROM document_chunks WHERE document_id=?1 ORDER BY chunk_index ASC").map_err(|e|crate::models::sanitize_error(e.to_string()))?;
-    let chunks = stmt.query_map(rusqlite::params![document_id], |r| Ok(DocumentChunk{id:r.get(0)?,document_id:r.get(1)?,chunk_index:r.get(2)?,content:r.get(3)?,embedding_json:r.get(4).ok(),metadata:r.get(5).ok(),created_at:r.get(6)?})).map_err(|e|crate::models::sanitize_error(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|crate::models::sanitize_error(e.to_string()))?;
+    let mut stmt = db.prepare("SELECT id,document_id,chunk_index,content,embedding_json,embedding_model,embedding_provider,embedding_dim,embedding_version,embedded_at,embedding_status,embedding_error,metadata,created_at FROM document_chunks WHERE document_id=?1 ORDER BY chunk_index ASC").map_err(|e|crate::models::sanitize_error(e.to_string()))?;
+    let chunks = stmt.query_map(rusqlite::params![document_id], |r| Ok(DocumentChunk{id:r.get(0)?,document_id:r.get(1)?,chunk_index:r.get(2)?,content:r.get(3)?,embedding_json:r.get(4).ok(),embedding_model:r.get(5).ok(),embedding_provider:r.get(6).ok(),embedding_dim:r.get(7).ok(),embedding_version:r.get(8).ok(),embedded_at:r.get(9).ok(),embedding_status:r.get(10).ok(),embedding_error:r.get(11).ok(),metadata:r.get(12).ok(),created_at:r.get(13)?})).map_err(|e|crate::models::sanitize_error(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|crate::models::sanitize_error(e.to_string()))?;
     Ok(chunks)
 }
 
@@ -240,7 +300,7 @@ pub fn search_documents(
     state: State<AppState>, project_id: String, query: String, limit: Option<i32>,
 ) -> Result<(RetrievalRun, Vec<RetrievalHit>), String> {
     let mut db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
-    let result = retrieve_for_context(&mut db, &project_id, &query, limit.unwrap_or(10), None)?;
+    let result = retrieve_for_context(&mut db, &project_id, &query, limit.unwrap_or(10), None, None, None)?;
     Ok((result.run, result.hits))
 }
 
@@ -255,8 +315,8 @@ pub fn get_retrieval_runs(state: State<AppState>, project_id: String) -> Result<
 #[tauri::command]
 pub fn get_retrieval_hits(state: State<AppState>, retrieval_run_id: String) -> Result<Vec<RetrievalHit>, String> {
     let db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
-    let mut stmt = db.prepare("SELECT id,retrieval_run_id,chunk_id,score,rank,used_by_agent,created_at FROM retrieval_hits WHERE retrieval_run_id=?1 ORDER BY rank ASC").map_err(|e|crate::models::sanitize_error(e.to_string()))?;
-    let hits = stmt.query_map(rusqlite::params![retrieval_run_id], |r| Ok(RetrievalHit{id:r.get(0)?,retrieval_run_id:r.get(1)?,chunk_id:r.get(2)?,score:r.get(3)?,rank:r.get(4)?,used_by_agent:r.get(5).ok(),created_at:r.get(6)?})).map_err(|e|crate::models::sanitize_error(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|crate::models::sanitize_error(e.to_string()))?;
+    let mut stmt = db.prepare("SELECT id,retrieval_run_id,chunk_id,score,rank,used_by_agent,score_breakdown,created_at FROM retrieval_hits WHERE retrieval_run_id=?1 ORDER BY rank ASC").map_err(|e|crate::models::sanitize_error(e.to_string()))?;
+    let hits = stmt.query_map(rusqlite::params![retrieval_run_id], |r| Ok(RetrievalHit{id:r.get(0)?,retrieval_run_id:r.get(1)?,chunk_id:r.get(2)?,score:r.get(3)?,rank:r.get(4)?,used_by_agent:r.get(5).ok(),score_breakdown:r.get(6).ok(),created_at:r.get(7)?})).map_err(|e|crate::models::sanitize_error(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|crate::models::sanitize_error(e.to_string()))?;
     Ok(hits)
 }
 
@@ -272,6 +332,7 @@ pub struct HitExcerpt {
     pub doc_title: String,
     pub doc_type: String,
     pub chunk_excerpt: String,
+    pub score_breakdown: Option<String>,
     pub source: Option<String>,
     pub provenance: Option<String>,
 }
@@ -282,11 +343,11 @@ pub fn get_retrieval_hit_excerpts(
 ) -> Result<Vec<HitExcerpt>, String> {
     let db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
     let mut stmt = db.prepare(
-        "SELECT h.id, h.retrieval_run_id, h.chunk_id, h.score, h.rank, h.used_by_agent, h.created_at, c.content, c.metadata, d.title, d.doc_type FROM retrieval_hits h JOIN document_chunks c ON h.chunk_id=c.id JOIN documents d ON c.document_id=d.id WHERE h.retrieval_run_id=?1 ORDER BY h.rank ASC"
+        "SELECT h.id, h.retrieval_run_id, h.chunk_id, h.score, h.rank, h.used_by_agent, h.score_breakdown, h.created_at, c.content, c.metadata, d.title, d.doc_type FROM retrieval_hits h JOIN document_chunks c ON h.chunk_id=c.id JOIN documents d ON c.document_id=d.id WHERE h.retrieval_run_id=?1 ORDER BY h.rank ASC"
     ).map_err(|e| crate::models::sanitize_error(e.to_string()))?;
     let hits = stmt.query_map(rusqlite::params![retrieval_run_id], |r| {
-        let content: String = r.get(7)?;
-        let metadata_str: Option<String> = r.get(8).ok();
+        let content: String = r.get(8)?;
+        let metadata_str: Option<String> = r.get(9).ok();
         let excerpt: String = crate::models::sanitize_error(content.chars().take(200).collect());
         let (source, provenance) = metadata_str.as_ref()
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
@@ -297,11 +358,75 @@ pub fn get_retrieval_hit_excerpts(
         Ok(HitExcerpt {
             id: r.get(0)?, retrieval_run_id: r.get(1)?, chunk_id: r.get(2)?,
             score: r.get(3)?, rank: r.get(4)?, used_by_agent: r.get(5).ok(),
-            created_at: r.get(6)?, doc_title: r.get(9)?, doc_type: r.get(10)?,
+            score_breakdown: r.get(6).ok(), created_at: r.get(7)?,
+            doc_title: r.get(10)?, doc_type: r.get(11)?,
             chunk_excerpt: excerpt, source, provenance,
         })
     }).map_err(|e| crate::models::sanitize_error(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
     Ok(hits)
+}
+
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+// Embedding commands
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+
+#[tauri::command]
+pub async fn embed_pending_chunks(
+    state: State<'_, AppState>, project_id: String, limit: Option<i32>,
+) -> Result<i32, String> {
+    const MAX_CHARS: usize = 8000;
+    let lim = limit.unwrap_or(10).clamp(1, 20);
+    let (model, chunk_ids, encrypted_key, base_url) = {
+        let db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+        let model: String = db.query_row("SELECT model FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or_else(|_| "text-embedding-3-small".into());
+        let encrypted: String = db.query_row("SELECT encrypted_api_key FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or_default();
+        let url: String = db.query_row("SELECT base_url FROM model_configs LIMIT 1", [], |r| r.get(0)).unwrap_or_default();
+        crate::commands::security::validate_base_url(&url)?;
+        let chunks: Vec<(String, String)> = db.prepare(
+            "SELECT c.id, c.content FROM document_chunks c JOIN documents d ON c.document_id=d.id WHERE d.project_id=?1 AND (c.embedding_status='pending' OR c.embedding_status IS NULL) LIMIT ?2"
+        ).map_err(|e| crate::models::sanitize_error(e.to_string()))?
+        .query_map(rusqlite::params![project_id, lim], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| crate::models::sanitize_error(e.to_string()))?
+        .filter_map(|r| r.ok()).collect();
+        (model, chunks, encrypted, url)
+    };
+
+    if chunk_ids.is_empty() { return Ok(0); }
+
+    let inputs: Vec<String> = chunk_ids.iter().map(|(_, c)| c.chars().take(MAX_CHARS).collect()).collect();
+    let api_key = crate::crypto::decrypt_saved_api_key(&encrypted_key)?;
+    let result = crate::commands::embedding::embed_batch(&base_url, &api_key, &model, &inputs).await;
+
+    let (vectors, emb_model, _tokens) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let mut db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+            let err = crate::models::sanitize_error(e);
+            for (cid, _) in &chunk_ids { db.execute("UPDATE document_chunks SET embedding_status='failed', embedding_error=?1 WHERE id=?2", rusqlite::params![err, cid]).map_err(|e| crate::models::sanitize_error(e.to_string()))?; }
+            return Err(err);
+        }
+    };
+
+    let dim = vectors.first().map(|v| v.len() as i32).unwrap_or(0);
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut db = state.db.lock().map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+    let mut count = 0;
+    for (i, (chunk_id, _)) in chunk_ids.iter().enumerate() {
+        if i >= vectors.len() { break; }
+        if let Err(e) = crate::commands::embedding::validate_embedding(&vectors[i], Some(dim as usize)) {
+            db.execute("UPDATE document_chunks SET embedding_status='failed', embedding_error=?1 WHERE id=?2",
+                rusqlite::params![crate::models::sanitize_error(e), chunk_id],
+            ).map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+            continue;
+        }
+        let vec_json = serde_json::to_string(&vectors[i]).unwrap_or_default();
+        db.execute(
+            "UPDATE document_chunks SET embedding_json=?1, embedding_model=?2, embedding_dim=?3, embedding_status='embedded', embedded_at=?4 WHERE id=?5",
+            rusqlite::params![vec_json, emb_model, dim, now, chunk_id],
+        ).map_err(|e| crate::models::sanitize_error(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -312,8 +437,7 @@ mod tests {
     fn retrieve_empty_query_rejected() {
         let r = retrieve_for_context(
             &mut rusqlite::Connection::open_in_memory().unwrap(),
-            "test", "", 5, None,
-        );
+            "test", "", 5, None, None, None);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("not be empty"));
     }
@@ -323,8 +447,7 @@ mod tests {
         let long = "a".repeat(501);
         let r = retrieve_for_context(
             &mut rusqlite::Connection::open_in_memory().unwrap(),
-            "test", &long, 5, None,
-        );
+            "test", &long, 5, None, None, None);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("max 500"));
     }
@@ -334,8 +457,7 @@ mod tests {
         let q = (0..25).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" ");
         let r = retrieve_for_context(
             &mut rusqlite::Connection::open_in_memory().unwrap(),
-            "test", &q, 5, None,
-        );
+            "test", &q, 5, None, None, None);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("Maximum is 20"));
     }
@@ -347,7 +469,7 @@ mod tests {
         assert_eq!(100_i32.clamp(MIN_LIMIT, MAX_LIMIT), 20);
     }
 
-    // ── DB-level tests with in-memory SQLite ──
+    // 鈹€鈹€ DB-level tests with in-memory SQLite 鈹€鈹€
 
     fn setup_rag_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -355,7 +477,7 @@ mod tests {
             "CREATE TABLE documents (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, content TEXT, doc_type TEXT, source_path TEXT, chunk_count INTEGER, created_at TEXT);
              CREATE TABLE document_chunks (id TEXT PRIMARY KEY, document_id TEXT, chunk_index INTEGER, content TEXT, embedding_json TEXT, metadata TEXT, created_at TEXT);
              CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, project_id TEXT, query_text TEXT, rewritten_queries TEXT, strategy TEXT, result_count INTEGER, duration_ms BIGINT, created_at TEXT);
-             CREATE TABLE retrieval_hits (id TEXT PRIMARY KEY, retrieval_run_id TEXT, chunk_id TEXT, score REAL, rank INTEGER, used_by_agent TEXT, created_at TEXT);"
+             CREATE TABLE retrieval_hits (id TEXT PRIMARY KEY, retrieval_run_id TEXT, chunk_id TEXT, score REAL, rank INTEGER, used_by_agent TEXT, score_breakdown TEXT, created_at TEXT);"
         ).unwrap();
         conn
     }
@@ -369,8 +491,7 @@ mod tests {
 
         let result = retrieve_for_context(
             &mut db, "proj1", "hello search", 5,
-            Some(("run-1", "qa.review", "QAAgent")),
-        ).unwrap();
+            Some(("run-1", "qa.review", "QAAgent")), None, None).unwrap();
 
         assert_eq!(result.run.query_text, "hello search");
         assert!(!result.hits.is_empty());
@@ -386,4 +507,84 @@ mod tests {
         let hit_count: i32 = db.query_row("SELECT COUNT(*) FROM retrieval_hits WHERE used_by_agent IS NOT NULL", [], |r| r.get(0)).unwrap();
         assert!(hit_count >= 1);
     }
+
+    #[test]
+    fn keyword_fallback_writes_strategy() {
+        let mut db = setup_rag_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute("INSERT INTO documents (id,project_id,title,content,doc_type,chunk_count,created_at) VALUES ('d1','proj1','Test','hello','game_design',0,?1)", rusqlite::params![now]).unwrap();
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,created_at) VALUES ('c1','d1',1,'hello world',?1)", rusqlite::params![now]).unwrap();
+        let r = retrieve_for_context(&mut db, "proj1", "hello", 5, None, Some(&[]), Some("keyword_fallback")).unwrap();
+        assert_eq!(r.run.strategy.as_deref(), Some("keyword_fallback"));
+    }
+
+    #[test]
+    fn hybrid_writes_strategy() {
+        let mut db = setup_rag_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute("INSERT INTO documents (id,project_id,title,content,doc_type,chunk_count,created_at) VALUES ('d1','proj1','Test','hello','game_design',0,?1)", rusqlite::params![now]).unwrap();
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,embedding_json,created_at) VALUES ('c1','d1',1,'hello world','[0.1,0.2,0.3]',?1)", rusqlite::params![now]).unwrap();
+        let qv = vec![0.1, 0.2, 0.3];
+        let r = retrieve_for_context(&mut db, "proj1", "hello", 5, None, Some(&qv), Some("hybrid")).unwrap();
+        assert_eq!(r.run.strategy.as_deref(), Some("hybrid"));
+    }
+
+    #[test]
+    fn vector_only_strategy() {
+        let mut db = setup_rag_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute("INSERT INTO documents (id,project_id,title,content,doc_type,chunk_count,created_at) VALUES ('d1','proj1','Test','hello','game_design',0,?1)", rusqlite::params![now]).unwrap();
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,embedding_json,created_at) VALUES ('c1','d1',1,'hello world','[0.1,0.2,0.3]',?1)", rusqlite::params![now]).unwrap();
+        let qv = vec![0.1, 0.2, 0.3];
+        let r = retrieve_for_context(&mut db, "proj1", "hello", 5, None, Some(&qv), Some("vector")).unwrap();
+        assert_eq!(r.run.strategy.as_deref(), Some("vector"));
+        assert!(!r.hits.is_empty());
+    }
+
+    #[test]
+    fn hybrid_merges_vector_only_candidate() {
+        let mut db = setup_rag_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute("INSERT INTO documents (id,project_id,title,content,doc_type,chunk_count,created_at) VALUES ('d1','proj1','Test','hello','game_design',0,?1)", rusqlite::params![now]).unwrap();
+        // Chunk with no keyword match, only vector match
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,embedding_json,created_at) VALUES ('c1','d1',1,'completely unrelated text here','[0.5,0.5,0.5]',?1)", rusqlite::params![now]).unwrap();
+        // Chunk with keyword match
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,embedding_json,created_at) VALUES ('c2','d1',2,'hello world','[0.6,0.6,0.6]',?1)", rusqlite::params![now]).unwrap();
+        let qv = vec![0.5, 0.5, 0.5]; // matches c1 better
+        let r = retrieve_for_context(&mut db, "proj1", "hello", 5, None, Some(&qv), Some("hybrid")).unwrap();
+        // Both chunks should appear (c1 via vector, c2 via keyword+vector)
+        assert!(r.hits.len() >= 1);
+        let chunk_ids: Vec<&str> = r.hits.iter().map(|h| h.chunk_id.as_str()).collect();
+        assert!(chunk_ids.contains(&"c2"), "keyword-matched chunk should appear");
+        // c1 should also appear from vector-only merge
+        assert!(chunk_ids.contains(&"c1"), "vector-only candidate should be merged");
+    }
+
+    #[test]
+    fn hybrid_score_breakdown_present() {
+        let mut db = setup_rag_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.execute("INSERT INTO documents (id,project_id,title,content,doc_type,chunk_count,created_at) VALUES ('d1','proj1','Test','hello','game_design',0,?1)", rusqlite::params![now]).unwrap();
+        db.execute("INSERT INTO document_chunks (id,document_id,chunk_index,content,embedding_json,created_at) VALUES ('c1','d1',1,'hello world test','[0.1,0.2,0.3]',?1)", rusqlite::params![now]).unwrap();
+        let qv = vec![0.1, 0.2, 0.3];
+        let r = retrieve_for_context(&mut db, "proj1", "hello", 5, None, Some(&qv), Some("hybrid")).unwrap();
+        for hit in &r.hits {
+            let bd = hit.score_breakdown.as_ref().unwrap();
+            assert!(bd.contains("keyword") || bd.contains("vector"));
+        }
+    }
+
+    #[test]
+    fn single_chunk_validation_failure_isolated() {
+        use crate::commands::embedding;
+        // Per-vector validation: a bad vector fails individually; good vector passes.
+        // In embed_pending_chunks: single chunk with NaN/finite/dimension error → marked failed,
+        // other chunks in same batch still get embedded (via 'continue' in the loop).
+        // Provider-level batch failure (HTTP error) → all chunks in batch marked failed.
+        assert!(embedding::validate_embedding(&[1.0, f64::NAN], None).is_err());
+        assert!(embedding::validate_embedding(&[0.1, 0.2], Some(2)).is_ok());
+        assert!(embedding::validate_embedding(&[0.5, 0.5, 0.5], Some(3)).is_ok());
+        assert!(embedding::validate_embedding(&[0.5, 0.5], Some(3)).is_err());
+    }
 }
+
