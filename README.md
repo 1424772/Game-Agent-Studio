@@ -252,6 +252,7 @@ cd src-tauri && cargo check  # Rust 快速检查
 - **Logo**: 自定义应用图标
 - **V1 硬化**: 事务原子化（proposal/event 同事务）、安全回归测试 15+、发布检查清单 + 安全审查文档
 - **P7 OS Keychain**: 系统级密钥存储（Windows Credential Manager / macOS Keychain / Linux Secret Service），自动迁移旧加密密钥
+- **P8 Embedding + Hybrid RAG**: 向量检索（cosine similarity）、hybrid keyword+vector 合并去重、keyword/vector/hybrid/keyword_fallback 四策略、embed_pending_chunks + per-chunk 校验隔离、score_breakdown 审计
 
 ### 迁移风险
 - **API Key 需重新配置**：旧数据 `api_key` 列已迁移为 `encrypted_api_key`
@@ -261,9 +262,9 @@ cd src-tauri && cargo check  # Rust 快速检查
 ## 后续计划
 
 - [ ] 流式 LLM 响应
-- [ ] 向量检索 + Embedding 集成
+- [x] 向量检索 + Embedding 集成 (P8)
 - [ ] 更多 Agent 类型（CardGameAgent、VNAgent 等）
-- [ ] OS Keychain 集成（Windows DPAPI / macOS Keychain）
+- [x] OS Keychain 集成 (P7)
 - [ ] Web 小游戏 / 微信小游戏导出
 - [ ] Godot / Ren'Py / Phaser 项目模板导出
 - [ ] 工作流可视化编辑器
