@@ -10,12 +10,29 @@
 | Error | All error paths through `sanitize_error()` — redacts Bearer/Authorization/api_key/sk-* | ✅ |
 | Export | `export_markdown`/`export_json` exclude `qa_review` and `system_internal` memory | ✅ |
 | RAG | Chunk excerpts sanitized before prompt injection; UI excerpts sanitized | ✅ |
-| OS Keychain | `KeychainSecretStore` stub exists; V1 uses `LocalEncryptedSecretStore` | ⚠️ V2 |
+| OS Keychain | `KeychainSecretStore` using `keyring` crate (Windows Credential Manager / macOS Keychain / Linux Secret Service) | ✅ v0.2.0 |
+| Fallback | `LocalEncryptedSecretStore` (AES-256-GCM) if OS keychain unavailable | ✅ |
 
-### Migration Plan for OS Keychain
-- V2 will implement `KeychainSecretStore` with Windows DPAPI (`CryptProtectData`)
-- Migration: re-encrypt existing API key on first launch after upgrade
-- Risk: V1 key is derivable by any process with hostname access (same machine)
+### SecretStore Architecture
+
+| Platform | Implementation |
+|----------|---------------|
+| Windows | Credential Manager via `keyring` crate (DPAPI-backed) |
+| macOS | Keychain via `keyring` crate |
+| Linux | Secret Service via `keyring` crate; falls back to `LocalEncryptedSecretStore` if DBus unavailable |
+
+### Migration Strategy
+1. On first launch after upgrade, detect old `encrypted_api_key` in SQLite
+2. Decrypt via `LocalEncryptedSecretStore`, store plaintext in OS keychain
+3. Replace `encrypted_api_key` with marker `"keychain_stored"` (unusable without keychain)
+4. If migration fails (keychain locked/unavailable): the old encrypted key is preserved and runtime falls back to LocalEncryptedSecretStore
+5. User may need to re-configure API key if keychain is unavailable on their platform
+
+### Risk Analysis
+- V1 (before v0.2.0): key derivable by any process with hostname access on same machine
+- V1 (v0.2.0+): key stored in OS credential manager, accessible only to same user/process
+- Linux headless: falls back to V1 behavior if DBus/Secret Service unavailable
+- Migration is best-effort; failure does not crash the app
 
 ## Tauri Permissions
 
@@ -124,6 +141,6 @@
 
 - Keyword-only search (no vector/embedding)
 - No streaming LLM responses
-- `LocalEncryptedSecretStore` key is machine-local but derivable (V2: DPAPI/Keychain)
+- `LocalEncryptedSecretStore` fallback on Linux when DBus/Secret Service unavailable
 - `cargo test --lib` runtime requires clean MinGW or MSVC + WebView2 Runtime
 - No template project exports (Godot/Ren'Py/Phaser deferred to V2)

@@ -261,6 +261,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute("ALTER TABLE improvement_proposals ADD COLUMN target_area TEXT", []).ok();
     conn.execute("ALTER TABLE improvement_proposals ADD COLUMN proposed_change TEXT", []).ok();
 
+    migrate_keychain_api_key(conn);
+
     Ok(())
 }
 
@@ -296,6 +298,60 @@ fn migrate_step_key_column(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum MigrationOutcome {
+    NothingToMigrate,
+    DecryptFailed,
+    KeychainWriteFailed,
+    MarkerUpdateFailed,
+    Success,
+}
+
+/// Attempt to migrate the API key from SQLite to the OS keychain.
+fn migrate_keychain_api_key(conn: &Connection) {
+    use crate::crypto::{KeychainSecretStore, LocalEncryptedSecretStore, SecretStore};
+    let keychain = match KeychainSecretStore::try_new() {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+    let local = LocalEncryptedSecretStore::new();
+    let _outcome = migrate_keychain_api_key_inner(conn, &local, &keychain);
+}
+
+/// Testable inner — returns outcome for each path.
+fn migrate_keychain_api_key_inner(
+    conn: &Connection,
+    local_decrypt: &dyn crate::crypto::SecretStore,
+    keychain_store: &dyn crate::crypto::SecretStore,
+) -> MigrationOutcome {
+    let encrypted: Option<String> = conn
+        .query_row("SELECT encrypted_api_key FROM model_configs WHERE encrypted_api_key != '' AND encrypted_api_key != 'keychain_stored' LIMIT 1", [], |r| r.get(0))
+        .ok();
+
+    let encrypted = match encrypted {
+        Some(e) => e,
+        None => return MigrationOutcome::NothingToMigrate,
+    };
+
+    let plaintext = match local_decrypt.decrypt(&encrypted) {
+        Ok(p) => p,
+        Err(_) => return MigrationOutcome::DecryptFailed,
+    };
+
+    match keychain_store.encrypt(&plaintext) {
+        Ok(_) => {
+            match conn.execute(
+                "UPDATE model_configs SET encrypted_api_key = 'keychain_stored' WHERE encrypted_api_key = ?1",
+                rusqlite::params![encrypted],
+            ) {
+                Ok(rows) if rows > 0 => MigrationOutcome::Success,
+                _ => MigrationOutcome::MarkerUpdateFailed,
+            }
+        }
+        Err(_) => MigrationOutcome::KeychainWriteFailed,
+    }
 }
 
 fn migrate_old_api_key_column(conn: &Connection) -> Result<()> {
@@ -354,4 +410,96 @@ fn migrate_old_api_key_column(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::LocalEncryptedSecretStore;
+    use crate::crypto::SecretStore;
+
+    fn setup_model_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE model_configs (id TEXT PRIMARY KEY, base_url TEXT, encrypted_api_key TEXT, model TEXT, temperature REAL, max_tokens INTEGER, created_at TEXT, updated_at TEXT)").unwrap();
+        conn
+    }
+
+    struct FakeKeychainStore { stored: std::sync::Mutex<Option<String>>, fail_write: bool }
+
+    impl FakeKeychainStore {
+        fn new() -> Self { Self { stored: std::sync::Mutex::new(None), fail_write: false } }
+        fn with_fail_write() -> Self { Self { stored: std::sync::Mutex::new(None), fail_write: true } }
+    }
+
+    impl SecretStore for FakeKeychainStore {
+        fn encrypt(&self, plaintext: &str) -> Result<String, String> {
+            if self.fail_write { return Err("keychain write failed".into()); }
+            *self.stored.lock().unwrap() = Some(plaintext.to_string());
+            Ok("keychain_stored".into())
+        }
+        fn decrypt(&self, _: &str) -> Result<String, String> {
+            self.stored.lock().unwrap().clone().ok_or_else(|| "no key".into())
+        }
+    }
+
+    #[test]
+    fn migration_success_writes_keychain_marker() {
+        let db = setup_model_db();
+        let local = LocalEncryptedSecretStore::new();
+        let ct = local.encrypt("sk-legacy-key").unwrap();
+        db.execute("INSERT INTO model_configs (id,encrypted_api_key,base_url,model,temperature,max_tokens,created_at,updated_at) VALUES ('c1',?1,'https://t.com','gpt',0.7,4096,datetime('now'),datetime('now'))", rusqlite::params![ct]).unwrap();
+        let kc = FakeKeychainStore::new();
+        let outcome = migrate_keychain_api_key_inner(&db, &local, &kc);
+        assert_eq!(outcome, MigrationOutcome::Success);
+        let s: String = db.query_row("SELECT encrypted_api_key FROM model_configs WHERE id='c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(s, "keychain_stored");
+        assert_eq!(kc.decrypt("").unwrap(), "sk-legacy-key");
+    }
+
+    #[test]
+    fn migration_write_failure_preserves_ciphertext() {
+        let db = setup_model_db();
+        let local = LocalEncryptedSecretStore::new();
+        let ct = local.encrypt("sk-legacy-key").unwrap();
+        db.execute("INSERT INTO model_configs (id,encrypted_api_key,base_url,model,temperature,max_tokens,created_at,updated_at) VALUES ('c1',?1,'https://t.com','gpt',0.7,4096,datetime('now'),datetime('now'))", rusqlite::params![ct]).unwrap();
+        let kc = FakeKeychainStore::with_fail_write();
+        let outcome = migrate_keychain_api_key_inner(&db, &local, &kc);
+        assert_eq!(outcome, MigrationOutcome::KeychainWriteFailed);
+        let s: String = db.query_row("SELECT encrypted_api_key FROM model_configs WHERE id='c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(s, ct, "old ciphertext must survive");
+    }
+
+    #[test]
+    fn migration_failure_decrypt_still_works() {
+        let db = setup_model_db();
+        let local = LocalEncryptedSecretStore::new();
+        let ct = local.encrypt("sk-legacy-key").unwrap();
+        db.execute("INSERT INTO model_configs (id,encrypted_api_key,base_url,model,temperature,max_tokens,created_at,updated_at) VALUES ('c1',?1,'https://t.com','gpt',0.7,4096,datetime('now'),datetime('now'))", rusqlite::params![ct]).unwrap();
+        let kc = FakeKeychainStore::with_fail_write();
+        migrate_keychain_api_key_inner(&db, &local, &kc);
+        let s: String = db.query_row("SELECT encrypted_api_key FROM model_configs WHERE id='c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(crate::crypto::decrypt_saved_api_key(&s).unwrap(), "sk-legacy-key");
+    }
+
+    #[test]
+    fn marker_update_failure_keeps_old_ciphertext() {
+        let db = setup_model_db();
+        let local = LocalEncryptedSecretStore::new();
+        let ct = local.encrypt("sk-legacy-key").unwrap();
+        db.execute("INSERT INTO model_configs (id,encrypted_api_key,base_url,model,temperature,max_tokens,created_at,updated_at) VALUES ('c1',?1,'https://t.com','gpt',0.7,4096,datetime('now'),datetime('now'))", rusqlite::params![ct]).unwrap();
+
+        // Block UPDATE via trigger
+        db.execute_batch(
+            "CREATE TRIGGER block_model_config_update BEFORE UPDATE ON model_configs
+             BEGIN SELECT RAISE(FAIL, 'marker update blocked'); END;"
+        ).unwrap();
+
+        let kc = FakeKeychainStore::new(); // keychain write succeeds
+        let outcome = migrate_keychain_api_key_inner(&db, &local, &kc);
+        assert_eq!(outcome, MigrationOutcome::MarkerUpdateFailed);
+
+        let s: String = db.query_row("SELECT encrypted_api_key FROM model_configs WHERE id='c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(s, ct, "old ciphertext must survive marker update failure");
+        assert_eq!(crate::crypto::decrypt_saved_api_key(&s).unwrap(), "sk-legacy-key");
+    }
 }

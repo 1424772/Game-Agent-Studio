@@ -55,7 +55,7 @@ npm run tauri build
 - **Keyword-only RAG search** — no vector/embedding retrieval yet
 - **No workflow editor** — workflows are defined as static Rust constants
 - **Template exports deferred** — Godot/Ren'Py/Phaser project export not implemented
-- **OS Keychain** — uses `LocalEncryptedSecretStore` (AES-256-GCM with hostname-derived key). Full DPAPI/Keychain integration planned for V2.
+- **OS Keychain**: Windows/macOS use native credential manager via `keyring` crate. Linux uses Secret Service; if DBus unavailable, falls back to `LocalEncryptedSecretStore` (AES-256-GCM with hostname-derived key). Migration from legacy encrypted key to keychain happens on first launch after upgrade.
 - **`cargo test --lib` may fail on MinGW-mixed systems** — see Environment Setup section above
 
 ## Migration from v0.1.x

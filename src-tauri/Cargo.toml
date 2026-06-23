@@ -27,3 +27,4 @@ rand = "0.8"
 hostname = "0.4"
 regex-lite = "0.1"
 url = "2"
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }

@@ -251,10 +251,12 @@ cd src-tauri && cargo check  # Rust 快速检查
 - **i18n**: 中英文双语界面，侧边栏语言切换，localStorage 持久化
 - **Logo**: 自定义应用图标
 - **V1 硬化**: 事务原子化（proposal/event 同事务）、安全回归测试 15+、发布检查清单 + 安全审查文档
+- **P7 OS Keychain**: 系统级密钥存储（Windows Credential Manager / macOS Keychain / Linux Secret Service），自动迁移旧加密密钥
 
 ### 迁移风险
 - **API Key 需重新配置**：旧数据 `api_key` 列已迁移为 `encrypted_api_key`
 - **导出路径变更**：不接受自定义 `output_dir`，统一写入应用数据目录
+- **Keychain 迁移**：首次启动自动迁移旧密文到 OS keychain，失败保留旧存储
 
 ## 后续计划
 

@@ -2,7 +2,7 @@ use crate::commands::memory;
 use crate::commands::rag;
 use crate::commands::security;
 use crate::commands::workflow;
-use crate::crypto::LocalEncryptedSecretStore;
+use crate::crypto::decrypt_saved_api_key;
 use crate::crypto::SecretStore;
 use crate::models::{
     AgentMessage, AgentRun, AgentRunStatus, AgentStep, LlmRequest, LlmResponse, LlmUsage,
@@ -291,7 +291,7 @@ pub async fn run_llm_completion(state: State<'_, AppState>, request: LlmRequest)
         let db = state.db.lock().map_err(|e| sanitize_error(e.to_string()))?;
         let r: Result<(String,String),_> = db.query_row("SELECT base_url, encrypted_api_key FROM model_configs LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?)));
         match r {
-            Ok((u, enc)) => { security::validate_base_url(&u)?; let d = LocalEncryptedSecretStore::new().decrypt(&enc).map_err(|e| sanitize_error(format!("Decrypt: {}", e)))?; (u, d) }
+            Ok((u, enc)) => { security::validate_base_url(&u)?; let d = decrypt_saved_api_key(&enc)?; (u, d) }
             Err(rusqlite::Error::QueryReturnedNoRows) => return Err("No model config".to_string()),
             Err(e) => return Err(sanitize_error(e.to_string())),
         }
