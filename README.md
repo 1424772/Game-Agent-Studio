@@ -19,6 +19,7 @@
 | LLM 调用 | reqwest（Rust 侧，前端不接触 API Key） |
 | LLM Provider | OpenAI-compatible API（用户可自定义 base_url / api_key / model） |
 | RAG 检索 | SQLite LIKE + 打分排序（V1 关键词检索） |
+| i18n | React Context + localStorage（中文 / English） |
 | 数据格式 | SQLite + JSON + Markdown |
 
 ## 安全架构
@@ -247,6 +248,9 @@ cd src-tauri && cargo check  # Rust 快速检查
 - **P4 记忆与事件**: 四层记忆语义 + memory_versions + layer/scope 校验 + 17 种事件类型 + get_events 过滤器
 - **P5 自迭代**: Proposal CRUD + 状态流转 + requires_human_approval + proposal_created/reviewed 审计
 - **P6 Agentic RAG**: Document/chunk/retrieval + retrieve_for_context + Agent workflow 接入 RAG + used_by_agent 追踪 + excerpt 脱敏
+- **i18n**: 中英文双语界面，侧边栏语言切换，localStorage 持久化
+- **Logo**: 自定义应用图标
+- **V1 硬化**: 事务原子化（proposal/event 同事务）、安全回归测试 15+、发布检查清单 + 安全审查文档
 
 ### 迁移风险
 - **API Key 需重新配置**：旧数据 `api_key` 列已迁移为 `encrypted_api_key`
