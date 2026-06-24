@@ -7,6 +7,28 @@ const CHUNK_SIZE: usize = 2000;
 const MIN_LIMIT: i32 = 1;
 const MAX_LIMIT: i32 = 20;
 
+pub fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let set_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let set_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    if set_a.is_empty() && set_b.is_empty() { return 1.0; }
+    let intersection = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+}
+
+pub fn deduplicate_excerpts(excerpts: &[(String, String, String)], threshold: f64) -> Vec<(String, String, String)> {
+    let mut result: Vec<(String, String, String)> = Vec::new();
+    for excerpt in excerpts {
+        let is_dup = result.iter().any(|existing| {
+            jaccard_similarity(&existing.2, &excerpt.2) >= threshold
+        });
+        if !is_dup {
+            result.push(excerpt.clone());
+        }
+    }
+    result
+}
+
 #[derive(Debug)]
 pub struct RetrievalResult {
     pub run: RetrievalRun,
@@ -578,13 +600,70 @@ mod tests {
     fn single_chunk_validation_failure_isolated() {
         use crate::commands::embedding;
         // Per-vector validation: a bad vector fails individually; good vector passes.
-        // In embed_pending_chunks: single chunk with NaN/finite/dimension error → marked failed,
+        // In embed_pending_chunks: single chunk with NaN/finite/dimension error -> marked failed,
         // other chunks in same batch still get embedded (via 'continue' in the loop).
-        // Provider-level batch failure (HTTP error) → all chunks in batch marked failed.
+        // Provider-level batch failure (HTTP error) -> all chunks in batch marked failed.
         assert!(embedding::validate_embedding(&[1.0, f64::NAN], None).is_err());
         assert!(embedding::validate_embedding(&[0.1, 0.2], Some(2)).is_ok());
         assert!(embedding::validate_embedding(&[0.5, 0.5, 0.5], Some(3)).is_ok());
         assert!(embedding::validate_embedding(&[0.5, 0.5], Some(3)).is_err());
+    }
+
+    #[test]
+    fn jaccard_identical_strings_is_one() {
+        let s = "hello world test";
+        assert!((jaccard_similarity(s, s) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn jaccard_disjoint_strings_is_zero() {
+        let a = "hello world";
+        let b = "foo bar baz";
+        assert_eq!(jaccard_similarity(a, b), 0.0);
+    }
+
+    #[test]
+    fn jaccard_partial_overlap() {
+        let a = "hello world test";
+        let b = "hello world exam";
+        let sim = jaccard_similarity(a, b);
+        assert!(sim > 0.4 && sim < 0.9, "partial overlap: {}", sim);
+    }
+
+    #[test]
+    fn jaccard_both_empty_is_one() {
+        assert_eq!(jaccard_similarity("", ""), 1.0);
+    }
+
+    #[test]
+    fn deduplicate_removes_near_duplicates() {
+        let excerpts = vec![
+            ("c1".into(), "Doc1".into(), "hello world test content here".into()),
+            ("c2".into(), "Doc2".into(), "hello world test content there".into()),
+            ("c3".into(), "Doc3".into(), "completely different topic stuff".into()),
+        ];
+        let result = deduplicate_excerpts(&excerpts, 0.8);
+        assert_eq!(result.len(), 2, "similar excerpts should be deduped");
+        let titles: Vec<&str> = result.iter().map(|(_, t, _)| t.as_str()).collect();
+        assert!(titles.contains(&"Doc3"), "dissimilar excerpt should be kept");
+    }
+
+    #[test]
+    fn deduplicate_all_unique_preserves_all() {
+        let excerpts = vec![
+            ("c1".into(), "Doc1".into(), "alpha beta gamma".into()),
+            ("c2".into(), "Doc2".into(), "delta epsilon zeta".into()),
+            ("c3".into(), "Doc3".into(), "eta theta iota".into()),
+        ];
+        let result = deduplicate_excerpts(&excerpts, 0.5);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn deduplicate_empty_list() {
+        let excerpts: Vec<(String, String, String)> = vec![];
+        let result = deduplicate_excerpts(&excerpts, 0.5);
+        assert!(result.is_empty());
     }
 }
 

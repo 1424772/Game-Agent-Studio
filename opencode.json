@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ocr": {
+      "type": "local",
+      "command": ["python", "D:\\AIcode\\BuildGameAgent\\tools\\ocr_server.py"],
+      "environment": {
+        "TESSDATA_PREFIX": "D:\\tessdata"
+      },
+      "enabled": true
+    }
+  }
+}

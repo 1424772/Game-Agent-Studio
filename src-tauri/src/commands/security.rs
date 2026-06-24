@@ -5,6 +5,8 @@ const MAX_MESSAGES: usize = 20;
 const MAX_TOTAL_CHARS: usize = 40000;
 pub const MAX_TOKENS_CAP: u32 = 32768;
 const REQUEST_TIMEOUT_SECS: u64 = 60;
+pub const MAX_RAG_CONTEXT_CHARS: usize = 6000;
+pub const MAX_PREVIOUS_OUTPUT_CHARS: usize = 12000;
 
 fn is_dev_mode() -> bool {
     cfg!(debug_assertions)

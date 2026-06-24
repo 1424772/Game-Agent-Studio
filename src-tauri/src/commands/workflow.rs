@@ -17,6 +17,8 @@ pub struct WorkflowStep {
     pub user_prompt_template: &'static str,
     pub save_to_memory: bool,
     pub use_rag: bool,
+    pub max_previous_output_chars: usize,
+    pub max_rag_chars: usize,
 }
 
 pub struct WorkflowDefinition {
@@ -69,6 +71,7 @@ static CARD_GAME_CONCEPT: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a ProducerAgent. Analyze game creation tasks and break them down into structured components. Output JSON with: overview, components, agent_assignments, execution_plan.",
             user_prompt_template: "Analyze this game creation task:\n\nTask: {task_description}\nWorkflow Type: card_game_concept\n\nOutput your analysis as JSON.",
             save_to_memory: false, use_rag: false,
+            max_previous_output_chars: 0, max_rag_chars: 0,
         },
         WorkflowStep {
             step_key: "designer.design",
@@ -76,6 +79,8 @@ static CARD_GAME_CONCEPT: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a GameDesignerAgent. Create detailed game design documents. Focus on card mechanics, core loop, card types, resource systems, combat rules. Output with clear markdown sections.",
             user_prompt_template: "Based on this producer plan, create a detailed card game design:\n\n{previous_output}\n\nOutput comprehensive game design content with clear markdown sections.",
             save_to_memory: true, use_rag: true,
+            max_previous_output_chars: crate::commands::security::MAX_PREVIOUS_OUTPUT_CHARS,
+            max_rag_chars: crate::commands::security::MAX_RAG_CONTEXT_CHARS,
         },
         WorkflowStep {
             step_key: "qa.review",
@@ -83,6 +88,8 @@ static CARD_GAME_CONCEPT: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a QAAgent. Review game design content and identify issues, inconsistencies, missing elements, balance problems, scope risks. Be constructive and specific.",
             user_prompt_template: "Review this card game design and identify issues:\n\n{previous_output}\n\nProvide structured review: 1) Issues Found 2) Missing Elements 3) Balance/Consistency Concerns 4) Scope Risks 5) Improvement Suggestions.",
             save_to_memory: true, use_rag: true,
+            max_previous_output_chars: crate::commands::security::MAX_PREVIOUS_OUTPUT_CHARS,
+            max_rag_chars: crate::commands::security::MAX_RAG_CONTEXT_CHARS,
         },
     ],
 };
@@ -97,6 +104,7 @@ static VISUAL_NOVEL_CONCEPT: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a ProducerAgent. Analyze game creation tasks and break them down into structured components. Output JSON with: overview, components, agent_assignments, execution_plan.",
             user_prompt_template: "Analyze this game creation task:\n\nTask: {task_description}\nWorkflow Type: visual_novel_concept\n\nOutput your analysis as JSON.",
             save_to_memory: false, use_rag: false,
+            max_previous_output_chars: 0, max_rag_chars: 0,
         },
         WorkflowStep {
             step_key: "designer.design",
@@ -104,6 +112,8 @@ static VISUAL_NOVEL_CONCEPT: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a GameDesignerAgent. Create detailed game design documents. Focus on story structure, branching narrative, character relationships, emotional pacing. Output with clear markdown sections.",
             user_prompt_template: "Based on this producer plan, create a detailed visual novel design:\n\n{previous_output}\n\nOutput comprehensive game design content with clear markdown sections.",
             save_to_memory: true, use_rag: true,
+            max_previous_output_chars: crate::commands::security::MAX_PREVIOUS_OUTPUT_CHARS,
+            max_rag_chars: crate::commands::security::MAX_RAG_CONTEXT_CHARS,
         },
         WorkflowStep {
             step_key: "qa.review",
@@ -111,6 +121,8 @@ static VISUAL_NOVEL_CONCEPT: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a QAAgent. Review game design content and identify issues, inconsistencies, missing elements, balance problems, scope risks. Be constructive and specific.",
             user_prompt_template: "Review this visual novel design and identify issues:\n\n{previous_output}\n\nProvide structured review: 1) Issues Found 2) Missing Elements 3) Balance/Consistency Concerns 4) Scope Risks 5) Improvement Suggestions.",
             save_to_memory: true, use_rag: true,
+            max_previous_output_chars: crate::commands::security::MAX_PREVIOUS_OUTPUT_CHARS,
+            max_rag_chars: crate::commands::security::MAX_RAG_CONTEXT_CHARS,
         },
     ],
 };
@@ -125,6 +137,7 @@ static GAME_DESIGN_DOC: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a ProducerAgent. Analyze game creation tasks and break them down into structured components. Output JSON with: overview, components, agent_assignments, execution_plan.",
             user_prompt_template: "Analyze this game creation task:\n\nTask: {task_description}\nWorkflow Type: game_design_doc\n\nOutput your analysis as JSON.",
             save_to_memory: false, use_rag: false,
+            max_previous_output_chars: 0, max_rag_chars: 0,
         },
         WorkflowStep {
             step_key: "designer.design",
@@ -132,6 +145,8 @@ static GAME_DESIGN_DOC: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a GameDesignerAgent. Create detailed game design documents. Cover game mechanics, systems, rules, and content structure. Output with clear markdown sections.",
             user_prompt_template: "Based on this producer plan, create a detailed game design document:\n\n{previous_output}\n\nOutput comprehensive game design content with clear markdown sections.",
             save_to_memory: true, use_rag: true,
+            max_previous_output_chars: crate::commands::security::MAX_PREVIOUS_OUTPUT_CHARS,
+            max_rag_chars: crate::commands::security::MAX_RAG_CONTEXT_CHARS,
         },
         WorkflowStep {
             step_key: "qa.review",
@@ -139,6 +154,8 @@ static GAME_DESIGN_DOC: WorkflowDefinition = WorkflowDefinition {
             system_prompt: "You are a QAAgent. Review game design content and identify issues, inconsistencies, missing elements, balance problems, scope risks. Be constructive and specific.",
             user_prompt_template: "Review this game design document and identify issues:\n\n{previous_output}\n\nProvide structured review: 1) Issues Found 2) Missing Elements 3) Balance/Consistency Concerns 4) Scope Risks 5) Improvement Suggestions.",
             save_to_memory: true, use_rag: true,
+            max_previous_output_chars: crate::commands::security::MAX_PREVIOUS_OUTPUT_CHARS,
+            max_rag_chars: crate::commands::security::MAX_RAG_CONTEXT_CHARS,
         },
     ],
 };

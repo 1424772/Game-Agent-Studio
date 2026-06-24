@@ -71,6 +71,52 @@ fn message_status_to_str(s: &MessageStatus) -> &'static str {
     }
 }
 
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let total_chars = s.chars().count();
+    if total_chars <= max_chars {
+        return s.to_string();
+    }
+    if max_chars < 50 {
+        let suffix = "[...]";
+        let keep = max_chars.saturating_sub(suffix.chars().count());
+        return format!("{}{}", s.chars().take(keep).collect::<String>(), suffix);
+    }
+    let skipped = total_chars.saturating_sub(max_chars);
+    let marker = format!("\n[...truncated {} chars...]\n", skipped);
+    let marker_len = marker.chars().count();
+    let content_budget = max_chars.saturating_sub(marker_len);
+    let head_keep = (content_budget as f64 * 0.65) as usize;
+    let tail_keep = content_budget.saturating_sub(head_keep);
+    let head: String = s.chars().take(head_keep).collect();
+    let tail: String = s.chars().rev().take(tail_keep).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{}{}{}", head, marker, tail)
+}
+
+fn truncate_rag_context(excerpts: &[(String, String, String)], max_chars: usize) -> Vec<(String, String, String)> {
+    if max_chars == 0 {
+        return excerpts.to_vec();
+    }
+    let sep = "---\n";
+    let sep_len = sep.chars().count();
+    let mut remaining = max_chars as i64;
+    let mut result = Vec::new();
+    for (chunk_id, title, excerpt) in excerpts {
+        let prefix = format!("[Source: {}] ", title);
+        let prefix_len = prefix.chars().count() as i64;
+        let between = if !result.is_empty() { sep_len as i64 + 1 } else { 0 };
+        let overhead = between + prefix_len;
+        if overhead >= remaining {
+            break;
+        }
+        let body_budget = (remaining - overhead) as usize;
+        let body: String = excerpt.chars().take(body_budget).collect();
+        let body_len = body.chars().count() as i64;
+        remaining = remaining - overhead - body_len;
+        result.push((chunk_id.clone(), title.clone(), body));
+    }
+    result
+}
+
 fn log_workflow_event(
     state: &State<'_, AppState>,
     project_id: &str,
@@ -370,9 +416,23 @@ pub async fn run_workflow(
     for step in def.steps {
         let agent_def = workflow::get_agent(step.agent_name);
         let agent_role = agent_def.map(|a| a.role_description).unwrap_or("");
+
+        let truncated_prev = if step.max_previous_output_chars > 0 && !previous_output.is_empty() {
+            let original_len = previous_output.chars().count();
+            let t = truncate_str(&previous_output, step.max_previous_output_chars);
+            if t.len() != previous_output.len() {
+                log_workflow_event(&state, &project_id, &run_id, "context_truncated",
+                    &serde_json::json!({"step_key": step.step_key, "original_chars": original_len, "truncated_chars": t.chars().count(), "max_budget": step.max_previous_output_chars}).to_string(),
+                    &correlation_id, "info")?;
+            }
+            t
+        } else {
+            previous_output.clone()
+        };
+
         let user_prompt = step.user_prompt_template
             .replace("{task_description}", &task_description)
-            .replace("{previous_output}", &previous_output);
+            .replace("{previous_output}", &truncated_prev);
 
         let (mut final_user_prompt, mut retrieval_run_id, mut retrieval_hits_json) = (user_prompt.clone(), None, serde_json::json!([]));
         let mut strategy = "keyword";
@@ -400,7 +460,7 @@ pub async fn run_workflow(
                 }
             };
 
-            let strategy = if query_emb.is_some() { "hybrid" } else { "keyword_fallback" };
+            strategy = if query_emb.is_some() { "hybrid" } else { "keyword_fallback" };
             let mut db = state.db.lock().map_err(|e| sanitize_error(e.to_string()))?;
             match rag::retrieve_for_context(&mut db, &project_id, &rag_query, 5,
                 Some((&run_id, step.step_key, step.agent_name)),
@@ -409,22 +469,20 @@ pub async fn run_workflow(
             ) {
                 Ok(result) => {
                     let mut hits_entries = Vec::new();
-                    let context: Vec<String> = result.excerpts.iter().map(|(chunk_id, title, excerpt)| {
-                        let sanitized = crate::models::sanitize_error(excerpt.clone());
+                    for (chunk_id, title, excerpt) in result.excerpts.iter() {
                         hits_entries.push(serde_json::json!({
                             "hit_id": "", "chunk_id": chunk_id, "doc_title": title,
-                            "excerpt": sanitized, "score": 0.0, "rank": 0,
+                            "excerpt": crate::models::sanitize_error(excerpt.clone()), "score": 0.0, "rank": 0,
                             "source": null, "provenance": null, "score_breakdown": null,
+                            "status": "unknown",
                         }));
-                        format!("[Source: {}] {}", title, sanitized)
-                    }).collect();
+                    }
                     for (i, hit) in result.hits.iter().enumerate() {
                         if i < hits_entries.len() {
                             hits_entries[i]["hit_id"] = serde_json::json!(hit.id);
                             hits_entries[i]["score"] = serde_json::json!(hit.score);
                             hits_entries[i]["rank"] = serde_json::json!(hit.rank);
                             hits_entries[i]["score_breakdown"] = serde_json::json!(hit.score_breakdown);
-                            // Query chunk metadata for source/provenance
                             if let Ok(meta_str) = db.query_row("SELECT metadata FROM document_chunks WHERE id=?1", rusqlite::params![hit.chunk_id], |r| r.get::<_,Option<String>>(0)) {
                                 if let Some(ref m) = meta_str {
                                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(m) {
@@ -435,6 +493,53 @@ pub async fn run_workflow(
                             }
                         }
                     }
+                    let effective_excerpts = if step.max_rag_chars > 0 {
+                        let truncated = truncate_rag_context(&result.excerpts, step.max_rag_chars);
+                        if truncated.len() < result.excerpts.len() {
+                            log_workflow_event(&state, &project_id, &run_id, "rag_context_truncated",
+                                &serde_json::json!({"step_key": step.step_key, "original_excerpts": result.excerpts.len(), "kept_excerpts": truncated.len(), "max_budget": step.max_rag_chars}).to_string(),
+                                &correlation_id, "info")?;
+                        }
+                        truncated
+                    } else {
+                        result.excerpts.clone()
+                    };
+                    let deduped = rag::deduplicate_excerpts(&effective_excerpts, 0.8);
+                    if deduped.len() < effective_excerpts.len() {
+                        log_workflow_event(&state, &project_id, &run_id, "rag_dedup_applied",
+                            &serde_json::json!({"step_key": step.step_key, "before_dedup": effective_excerpts.len(), "after_dedup": deduped.len(), "threshold": 0.8}).to_string(),
+                            &correlation_id, "info")?;
+                    }
+
+                    let deduped_ids: std::collections::HashSet<&str> = deduped.iter().map(|(id, _, _)| id.as_str()).collect();
+                    let effective_ids: std::collections::HashSet<&str> = effective_excerpts.iter().map(|(id, _, _)| id.as_str()).collect();
+                    let deduped_map: std::collections::HashMap<&str, &str> = deduped.iter()
+                        .map(|(id, _, excerpt)| (id.as_str(), excerpt.as_str()))
+                        .collect();
+                    for entry in &mut hits_entries {
+                        let cid = entry["chunk_id"].as_str().unwrap_or("").to_string();
+                        if deduped_ids.contains(cid.as_str()) {
+                            entry["status"] = serde_json::json!("injected");
+                            if let Some(&injected_body) = deduped_map.get(cid.as_str()) {
+                                let original = entry["excerpt"].as_str().unwrap_or("");
+                                let injected = crate::models::sanitize_error(injected_body.to_string());
+                                let orig_chars = original.chars().count();
+                                let inj_chars = injected.chars().count();
+                                entry["excerpt"] = serde_json::json!(injected);
+                                entry["original_excerpt_chars"] = serde_json::json!(orig_chars);
+                                entry["injected_excerpt_chars"] = serde_json::json!(inj_chars);
+                                entry["truncated"] = serde_json::json!(orig_chars != inj_chars);
+                            }
+                        } else if effective_ids.contains(cid.as_str()) {
+                            entry["status"] = serde_json::json!("deduped_out");
+                        } else {
+                            entry["status"] = serde_json::json!("truncated");
+                        }
+                    }
+
+                    let context: Vec<String> = deduped.iter().map(|(_, title, excerpt)| {
+                        format!("[Source: {}] {}", title, crate::models::sanitize_error(excerpt.clone()))
+                    }).collect();
                     if !context.is_empty() {
                         final_user_prompt = format!("{}\n\nRelevant Context from Knowledge Base:\n{}",
                             final_user_prompt, context.join("\n---\n"));
@@ -621,5 +726,168 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn truncate_str_noop_when_under_budget() {
+        let s = "hello world";
+        let result = truncate_str(s, 20);
+        assert_eq!(result, s);
+        assert!(result.chars().count() <= 20);
+    }
+
+    #[test]
+    fn truncate_str_result_within_budget() {
+        let s = "a".repeat(500);
+        let result = truncate_str(&s, 200);
+        assert!(result.chars().count() <= 200, "result chars {} exceeds budget 200", result.chars().count());
+        assert!(result.contains("[...truncated"));
+    }
+
+    #[test]
+    fn truncate_str_tiny_budget() {
+        let s = "hello world this is a test string";
+        let result = truncate_str(s, 10);
+        assert!(result.chars().count() <= 10, "result chars {} exceeds budget 10", result.chars().count());
+        assert!(result.ends_with("[...]"));
+    }
+
+    #[test]
+    fn truncate_str_chars_not_bytes() {
+        let s = "𝒶".repeat(100); // each char is 4 bytes
+        assert!(s.len() > s.chars().count());
+        let result = truncate_str(&s, 50);
+        assert!(result.chars().count() <= 50, "chars budget must use chars().count()");
+    }
+
+    #[test]
+    fn truncate_rag_context_preserves_within_budget() {
+        let excerpts = vec![
+            ("c1".into(), "Doc1".into(), "short content".into()),
+            ("c2".into(), "Doc2".into(), "another piece".into()),
+        ];
+        let result = truncate_rag_context(&excerpts, 10000);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn truncate_rag_context_drops_over_budget() {
+        let excerpts: Vec<(String, String, String)> = (0..10).map(|i| {
+            (format!("c{}", i), format!("Doc{}", i), "x".repeat(100))
+        }).collect();
+        let result = truncate_rag_context(&excerpts, 200);
+        assert!(result.len() < 10, "some excerpts should be dropped");
+        assert!(!result.is_empty(), "at least one should fit");
+    }
+
+    #[test]
+    fn truncate_rag_context_zero_returns_all() {
+        let excerpts = vec![
+            ("c1".into(), "Doc1".into(), "content".into()),
+        ];
+        let result = truncate_rag_context(&excerpts, 0);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn truncate_rag_context_excerpt_has_no_source_prefix() {
+        let excerpts = vec![
+            ("c1".into(), "Doc1".into(), "hello world body text".into()),
+        ];
+        let result = truncate_rag_context(&excerpts, 500);
+        assert_eq!(result.len(), 1);
+        // The excerpt body should NOT contain [Source: ...] prefix
+        let body = &result[0].2;
+        assert!(!body.contains("[Source:"), "excerpt body must not contain [Source:] wrapper, got: {}", body);
+        assert!(body.contains("hello world"), "excerpt body should contain the original text");
+    }
+
+    #[test]
+    fn truncate_rag_context_budget_matches_prompt_format() {
+        let excerpts = vec![
+            ("c1".into(), "LongDocumentTitle".into(), "some body text here for testing".into()),
+        ];
+        let max_budget: usize = 200;
+        let result = truncate_rag_context(&excerpts, max_budget);
+        // Simulate the prompt construction from agents.rs
+        let context: Vec<String> = result.iter().map(|(_, title, excerpt)| {
+            format!("[Source: {}] {}", title, excerpt)
+        }).collect();
+        let joined = context.join("\n---\n");
+        assert!(joined.chars().count() <= max_budget + 10,
+            "joined prompt {} exceeds budget {} (allow small slack for join)", joined.chars().count(), max_budget);
+    }
+
+    #[test]
+    fn truncate_rag_context_budget_multiple_excerpts() {
+        let excerpts = vec![
+            ("c1".into(), "T1".into(), "a b c d e f g h i j".into()),
+            ("c2".into(), "T2".into(), "k l m n o p q r s t".into()),
+            ("c3".into(), "T3".into(), "u v w x y z".into()),
+        ];
+        let max_budget: usize = 100;
+        let result = truncate_rag_context(&excerpts, max_budget);
+        let context: Vec<String> = result.iter().map(|(_, title, excerpt)| {
+            format!("[Source: {}] {}", title, excerpt)
+        }).collect();
+        let joined = context.join("\n---\n");
+        assert!(joined.chars().count() <= max_budget + 10,
+            "joined {} chars exceeds budget {}", joined.chars().count(), max_budget);
+    }
+
+    #[test]
+    fn workflow_steps_have_token_budgets_set() {
+        for wt in &[WorkflowType::CardGameConcept, WorkflowType::VisualNovelConcept, WorkflowType::GameDesignDoc] {
+            if let Some(def) = workflow::get_workflow(wt) {
+                for step in def.steps {
+                    if step.use_rag {
+                        assert!(step.max_rag_chars > 0,
+                            "use_rag step '{}' should have max_rag_chars > 0", step.step_key);
+                    }
+                    if step.save_to_memory {
+                        assert!(step.max_previous_output_chars > 0 || step.step_order == 1,
+                            "step '{}' with save_to_memory should have max_previous_output_chars", step.step_key);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_rag_context_injected_excerpt_matches_prompt_line() {
+        let excerpts = vec![
+            ("c1".into(), "MyDoc".into(), "this is the full original excerpt body text here".into()),
+        ];
+        let max_budget: usize = 80;
+        let truncated = truncate_rag_context(&excerpts, max_budget);
+        let deduped = rag::deduplicate_excerpts(&truncated, 0.8);
+
+        for (chunk_id, title, injected_body) in &deduped {
+            let prompt_line = format!("[Source: {}] {}", title, injected_body);
+            assert!(prompt_line.contains(injected_body),
+                "prompt line must contain injected body verbatim for chunk {}", chunk_id);
+            let orig = excerpts.iter().find(|(id, _, _)| id == chunk_id).unwrap();
+            if injected_body.chars().count() < orig.2.chars().count() {
+                assert!(injected_body.chars().count() < orig.2.chars().count(),
+                    "truncated body should be shorter than original");
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_rag_context_excerpt_body_is_shorter_when_budget_tight() {
+        let excerpts = vec![
+            ("c1".into(), "D".into(), "very long content that will definitely be truncated because the budget is so small".into()),
+        ];
+        let max_budget: usize = 40;
+        let result = truncate_rag_context(&excerpts, max_budget);
+        assert_eq!(result.len(), 1);
+        let injected_body = &result[0].2;
+        let original_body = &excerpts[0].2;
+        assert!(injected_body.chars().count() < original_body.chars().count(),
+            "with tight budget injected {} chars should be shorter than original {} chars",
+            injected_body.chars().count(), original_body.chars().count());
+        assert!(!injected_body.contains("[Source:"),
+            "injected body must not contain [Source:] prefix");
     }
 }

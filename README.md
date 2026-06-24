@@ -18,7 +18,8 @@
 | 加密 | AES-256-GCM（API Key 加密存储） |
 | LLM 调用 | reqwest（Rust 侧，前端不接触 API Key） |
 | LLM Provider | OpenAI-compatible API（用户可自定义 base_url / api_key / model） |
-| RAG 检索 | SQLite LIKE + 打分排序（V1 关键词检索） |
+| RAG 检索 | SQLite LIKE + 向量混合检索（Hybrid RAG） |
+| OCR | Tesseract OCR (MCP Server, 本地离线) |
 | i18n | React Context + localStorage（中文 / English） |
 | 数据格式 | SQLite + JSON + Markdown |
 
@@ -253,16 +254,35 @@ cd src-tauri && cargo check  # Rust 快速检查
 - **V1 硬化**: 事务原子化（proposal/event 同事务）、安全回归测试 15+、发布检查清单 + 安全审查文档
 - **P7 OS Keychain**: 系统级密钥存储（Windows Credential Manager / macOS Keychain / Linux Secret Service），自动迁移旧加密密钥
 - **P8 Embedding + Hybrid RAG**: 向量检索（cosine similarity）、hybrid keyword+vector 合并去重、keyword/vector/hybrid/keyword_fallback 四策略、embed_pending_chunks + per-chunk 校验隔离、score_breakdown 审计
+- **P9a Token 预算 + RAG 压缩**: context_token_budgeting（truncate_str + truncate_rag_context）、Jaccard deduplication、injected/truncated/deduped_out 状态追踪、字符级预算精确控制
 
 ### 迁移风险
 - **API Key 需重新配置**：旧数据 `api_key` 列已迁移为 `encrypted_api_key`
 - **导出路径变更**：不接受自定义 `output_dir`，统一写入应用数据目录
 - **Keychain 迁移**：首次启动自动迁移旧密文到 OS keychain，失败保留旧存储
 
+## OCR 配置（用于 DeepSeek 等无多模态模型）
+
+本机已配置 Tesseract OCR MCP Server，OpenCode 可通过 OCR 工具读取图片中的文字。
+
+### 组件清单
+
+| 组件 | 位置 |
+|---|---|
+| Tesseract OCR 引擎 | `C:\Program Files\Tesseract-OCR\tesseract.exe` |
+| 语言包 (eng + chi_sim) | `D:\tessdata\` |
+| MCP 服务脚本 | `tools/ocr_server.py` |
+| opencode 配置 | `opencode.json` |
+
+### 使用
+
+重启 OpenCode 后，在对话中拖入图片或指定路径，调用 `ocr` 工具即可提取文字。无需 API Key，纯本地离线运行。
+
 ## 后续计划
 
 - [ ] 流式 LLM 响应
 - [x] 向量检索 + Embedding 集成 (P8)
+- [x] 上下文 Token 预算 + RAG 去重 (P9a)
 - [ ] 更多 Agent 类型（CardGameAgent、VNAgent 等）
 - [x] OS Keychain 集成 (P7)
 - [ ] Web 小游戏 / 微信小游戏导出
